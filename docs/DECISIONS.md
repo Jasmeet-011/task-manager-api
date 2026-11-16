@@ -87,12 +87,17 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 - Records for DTOs, no Lombok, package by feature, constructor injection.
 - **Why:** Everything is visible in the source, which makes it explainable. Records are idiomatic Java 17.
 
+### ADR-009: Spring Boot 4.1.2
+
+- **Options:** 4.1.2 (latest stable), 4.0.9 (older stable line). 4.2.0.RC2 and snapshots excluded by the "stable only" rule.
+- **Why:** Latest stable release from start.spring.io, as CLAUDE.md requires. Supports Java 17.
+- **Consequences:** Jackson 3 (`tools.jackson` packages) and `@MockitoBean` in tests. The H2 console is its own module (`spring-boot-h2console`), which Initializr adds to the pom automatically.
+- **Note:** Initializr reports the version as `4.1.2.RELEASE`, but Maven Central publishes `4.1.2`. The generated pom had to be corrected to `4.1.2`.
+- **Tradeoff:** A newer major line has less community material than Boot 3.x.
+
 ---
 
 ## Pending (settle in the milestone session, then move up)
-
-**M1**
-- Exact Spring Boot version.
 
 **M2**
 - Is `dueDate` required or optional? (Lean: optional, since real tasks don't always have deadlines.)

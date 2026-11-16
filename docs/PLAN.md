@@ -38,7 +38,7 @@ If time gets tight, M7 can be trimmed to the bare requirements. M8 is never skip
 **Build**
 - Generate from start.spring.io: Maven, Java 17, latest stable Spring Boot, group `dev.jasmeet`, artifact `taskmanager`. Dependencies: Spring Web, Spring Data JPA, Validation, H2.
 - `application.properties`: H2 in-memory, `spring.jpa.open-in-view=false`, H2 console at `/h2-console` for demos.
-- Empty feature packages per CLAUDE.md.
+- No empty feature packages. `task/`, `project/`, `ai/` and `common/` appear in M2 and later, when real classes go in.
 - README skeleton with the run and test commands.
 
 **Done when**
