@@ -58,6 +58,7 @@ Layering:
 - `spring.jpa.open-in-view=false`.
 - Dates are ISO-8601 `LocalDate` (`yyyy-MM-dd`).
 - Services throw typed exceptions. `GlobalExceptionHandler` maps them to the error body in ADR-005. No try/catch returning `ResponseEntity` inside controllers.
+- Import types instead of writing fully qualified names in code.
 - Use an injectable `java.time.Clock` wherever "today" matters (AI prompt, date logic) so tests are deterministic.
 - If the Spring Boot version is 4.x: Jackson 3 uses `tools.jackson` packages, and tests use `@MockitoBean` (the old `@MockBean` is removed). Check the actual version before assuming APIs.
 

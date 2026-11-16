@@ -64,6 +64,12 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 | `AI_NOT_CONFIGURED` | 503 | No API key set |
 | `AI_TIMEOUT` | 504 | Model call exceeded the timeout |
 | `INTERNAL_ERROR` | 500 | Anything unexpected. Logged server-side, no stack trace returned |
+| `METHOD_NOT_ALLOWED` | 405 | Wrong HTTP method. The `Allow` header is kept. (Added in M2) |
+| `UNSUPPORTED_MEDIA_TYPE` | 415 | Request Content-Type is not supported. (Added in M2) |
+| `CLIENT_ERROR` | 4xx | Fallback for a 4xx status with no specific code above, e.g. 406. (Added in M2) |
+
+- **Amended in M2:** the last three rows were added so that every status Spring MVC can produce has a stable code. `type` is always `"about:blank"` and is set explicitly, because Spring leaves it out of the JSON otherwise.
+- **Known limit:** errors Tomcat rejects before Spring MVC runs (malformed URLs such as `/tasks/%`) return Tomcat's HTML 400 page, not this body. It leaks no stack trace or message. Optional M8 item.
 
 - **Why:** A real standard that's built into Spring, with one shape for every error and field-level detail where it matters.
 - **Tradeoff:** Slightly verbose, and `code` and `fieldErrors` are our own extensions.
@@ -95,16 +101,22 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 - **Note:** Initializr reports the version as `4.1.2.RELEASE`, but Maven Central publishes `4.1.2`. The generated pom had to be corrected to `4.1.2`.
 - **Tradeoff:** A newer major line has less community material than Boot 3.x.
 
+### ADR-010: Task field rules and PUT semantics (M2)
+
+- **`dueDate` is required. Past dates are allowed on create and on update.** A create-only check could be bypassed with a PUT anyway, and overdue tasks must stay editable.
+- **`priority` is required, with no default.** Priority is a judgment only the user can make, so the server does not guess.
+- **`status` is not part of the create request.** Every new task starts as TODO. A `status` sent on create is ignored. On update, `status` is required.
+- **PUT is a full replacement.** The client sends `title`, `dueDate`, `priority` and `status` every time. `description` is optional, and omitting it clears it. `CreateTaskRequest` and `UpdateTaskRequest` are separate records.
+- **PUT never touches the project.** Project assignment comes in M3 through its own endpoints.
+- **Limits: title up to 200 characters, description up to 2000.** The `@Size` annotations and the `@Column(length)` on `Task` use the same constants (`Task.TITLE_MAX`, `Task.DESCRIPTION_MAX`), so a value cannot pass validation and then fail in the database. Violations say "must be at most N characters".
+- **Unknown JSON properties are ignored** (Boot's default). Tolerant reader: clients don't break if we add fields.
+- **A number is rejected for an enum field.** Jackson 3 maps `"priority": 1` to MEDIUM by position unless `spring.jackson.datatype.enum.fail-on-numbers-for-enums=true`. We turn it on, so it returns 400 `VALIDATION_FAILED` naming the field.
+- **`GET /tasks` takes `page` (default 0, min 0) and `size` (default 20, 1 to 100) only, ordered by id.** This applies ADR-006's default and cap. Sort and filters arrive in M4.
+- **Tradeoff:** a client that wants to change one field must resend the others. The UI does that. Unknown properties are not reported, so a misspelled optional field is silently dropped.
+
 ---
 
 ## Pending (settle in the milestone session, then move up)
-
-**M2**
-- Is `dueDate` required or optional? (Lean: optional, since real tasks don't always have deadlines.)
-- Default `priority` when omitted, or make it required? (Lean: default MEDIUM.)
-- Default `status` on create. (Lean: TODO.)
-- PUT semantics: full replacement or partial update? (Lean: full replacement, which is what PUT means.)
-- Field limits. (Lean: title up to 200 chars, description up to 2000.)
 
 **M3**
 - How tasks get associated: dedicated endpoints `PUT /tasks/{id}/project/{projectId}` and `DELETE /tasks/{id}/project` (lean), or `projectId` in the task body.

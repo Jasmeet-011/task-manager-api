@@ -21,15 +21,18 @@ Any exception thrown on the way
 
 ```
 JSON body → CreateTaskRequest (@Valid)
-  invalid field / bad enum / bad date → 400 VALIDATION_FAILED with fieldErrors
-  invalid JSON syntax                 → 400 MALFORMED_REQUEST
+  invalid field / bad enum (a number too) / bad date → 400 VALIDATION_FAILED with fieldErrors
+  invalid JSON syntax or empty body                  → 400 MALFORMED_REQUEST
+  title, dueDate and priority are required, there are no defaults, and status is not accepted
 → TaskService.create
-  apply defaults (status, priority per DECISIONS)
+  status is always TODO
   save Task
-→ 201 Created, Location: /tasks/{id}, body TaskResponse
+→ 201 Created, Location: /tasks/{id} (path only, no query string), body TaskResponse
 ```
 
 ## List tasks: `GET /tasks?status=&priority=&dueAfter=&dueBefore=&projectId=&page=&size=&sort=`
+
+As built in M2, only `page` (default 0) and `size` (default 20, 1 to 100) exist, ordered by id. Bad values return 400 VALIDATION_FAILED naming the param. The filters and `sort` below arrive in M4.
 
 ```
 query params → filter values + Pageable
@@ -87,4 +90,10 @@ set task.project (or null to unassign)
 any unhandled exception
 → GlobalExceptionHandler logs it with the stack trace (server side only)
 → 500 INTERNAL_ERROR, generic detail, no stack trace in the body
+
+Spring MVC exceptions with no specific handler (e.g. 406)
+→ handleExceptionInternal fills in type, code (CLIENT_ERROR for unmapped 4xx) and fieldErrors only where missing
+
+Rejected by Tomcat before Spring MVC runs (e.g. /tasks/%)
+→ Tomcat's HTML 400 page, not ADR-005, no stack trace. Optional M8 item.
 ```

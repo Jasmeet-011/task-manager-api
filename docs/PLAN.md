@@ -72,7 +72,7 @@ If time gets tight, M7 can be trimmed to the bare requirements. M8 is never skip
 - Validation tests asserting on the error body: missing title, unknown priority, malformed date.
 - 404 test asserting the same body shape.
 
-**Done when:** every error path returns the ADR-005 shape, and no request can produce a stack trace.
+**Done when:** every error that reaches Spring MVC returns the ADR-005 shape, and no response contains a stack trace. Malformed URLs that Tomcat rejects before Spring runs (e.g. `/tasks/%`) return Tomcat's own HTML 400 page, not ADR-005. That is a documented limit, handled by an optional M8 item.
 
 ## M3: Project entity and association
 
@@ -142,6 +142,7 @@ If time gets tight, M7 can be trimmed to the bare requirements. M8 is never skip
 - `UpdateTaskRequest.version` is required.
 - The service compares the client's version to the current one and throws a conflict on mismatch. It also maps `ObjectOptimisticLockingFailureException` (a concurrent write between read and save) to the same 409.
 - 409 `VERSION_CONFLICT` with the ADR-005 body.
+- **Watch out (found in M2 review):** `TaskService.update` builds the `TaskResponse` before the transaction commits, and `@Version` only increments at flush. Once versioning exists, the PUT response would carry the OLD version and the client's next update would get a false 409. Fix when building M6: call `saveAndFlush` (or `flush()`) before mapping to the response, and assert the returned version in the integration test.
 
 **Tests**
 - Integration test: create the task, update it with the right version (200, version increments), then update again with the old version (409, body asserted).
@@ -162,6 +163,7 @@ If time gets tight, M7 can be trimmed to the bare requirements. M8 is never skip
 ## M8: Hardening and submission prep
 
 - Full `./mvnw test` passes.
+- Optional: make errors rejected by Tomcat before Spring MVC runs (malformed URLs such as `/tasks/%`, `/%`, `/tasks/1%00`) return the ADR-005 body, via a custom `ErrorController`. Today they return Tomcat's HTML 400 page. It contains no stack trace or exception message, because `server.error.include-stacktrace` and `include-message` are `never`, but it is not ADR-005.
 - README complete:
   - setup and the single run command
   - how to run tests
