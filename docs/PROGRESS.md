@@ -6,7 +6,7 @@
 |-----------|--------|------------|
 | M0: Decisions and docs | Done | n/a |
 | M1: Scaffold | Done | transcripts/01-scaffold.md |
-| M2: Task CRUD and error handling | Done (not yet committed) | |
+| M2: Task CRUD and error handling | Done | transcripts/02-task-crud.md |
 | M3: Project entity and association | Not started | |
 | M4: Filtering, sorting, pagination | Not started | |
 | M5: AI suggest endpoint | Not started | |
@@ -37,7 +37,7 @@ Newest first. One entry per Claude Code session.
 - Known gaps:
   - The null-response guard in `handleExceptionInternal` has no test. `super` returns null only when the response is already committed, which MockMvc cannot easily reproduce.
   - Errors Tomcat rejects before Spring runs (`/tasks/%`, `/%`, `/tasks/1%00`) return Tomcat's HTML 400 page, not ADR-005. No stack trace or message in it. Optional M8 item in PLAN.md.
-- Left for next session: M3. Nothing committed yet. Proposed commit points are in the session summary.
+- Left for next session: M3. M2 is committed in three commits (`5e7a583`, `8d9933f`, `74463f1`), each with a green `./mvnw test`. Not pushed.
 
 ### Session 01: M1 Scaffold (2026-11-15)
 - Built: Initializr scaffold at repo root (Boot 4.1.2, Maven, Java 17; web, data-jpa, validation, h2). Merged `.gitignore` (kept `.DS_Store`). `application.properties` with H2 in-memory, `open-in-view=false`, `ddl-auto=create-drop`, H2 console at `/h2-console`. README skeleton. PLAN.md M1 updated: no empty packages, they arrive in M2.
