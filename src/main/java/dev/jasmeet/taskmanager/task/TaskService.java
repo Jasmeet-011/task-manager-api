@@ -1,5 +1,6 @@
 package dev.jasmeet.taskmanager.task;
 
+import dev.jasmeet.taskmanager.common.InvalidRequestException;
 import dev.jasmeet.taskmanager.common.NotFoundException;
 import dev.jasmeet.taskmanager.common.PageResponse;
 import dev.jasmeet.taskmanager.project.Project;
@@ -40,10 +41,16 @@ public class TaskService {
     }
 
     /** @param sort the raw values of the "sort" param. TaskSort validates them and adds the default and the id tiebreaker. */
-    public PageResponse<TaskResponse> list(int page, int size, List<String> sort) {
-        // N+1 (fixed later in M4): the .map below reads each task's project name, one SELECT per distinct project.
+    public PageResponse<TaskResponse> list(TaskFilter filter, int page, int size, List<String> sort) {
+        // Both dates are inclusive, so equal dates mean "due exactly that day". A backwards range is
+        // almost certainly swapped dates, and an empty list would hide the mistake.
+        if (filter.dueAfter() != null && filter.dueBefore() != null && filter.dueAfter().isAfter(filter.dueBefore())) {
+            throw new InvalidRequestException("dueAfter", "must not be later than dueBefore");
+        }
         PageRequest pageRequest = PageRequest.of(page, size, TaskSort.resolve(sort));
-        return PageResponse.from(taskRepository.findAll(pageRequest).map(TaskResponse::from));
+        // The repository fetches the project in the same query, so the mapping below runs no extra SELECTs.
+        return PageResponse.from(
+                taskRepository.findAll(TaskSpecifications.from(filter), pageRequest).map(TaskResponse::from));
     }
 
     @Transactional

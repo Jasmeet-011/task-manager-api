@@ -247,6 +247,69 @@ class ErrorHandlingIntegrationTest {
                 .andExpect(jsonPath("$.fieldErrors[0].message").value("must be a valid number"));
     }
 
+    // ---------- 400 VALIDATION_FAILED: list filters ----------
+
+    private ResultActions expectBadParam(ResultActions actions, String param, String message) throws Exception {
+        return expectProblem(actions, 400, "VALIDATION_FAILED", "/tasks")
+                .andExpect(jsonPath("$.fieldErrors.length()").value(1))
+                .andExpect(jsonPath("$.fieldErrors[0].field").value(param))
+                .andExpect(jsonPath("$.fieldErrors[0].message").value(message));
+    }
+
+    @Test
+    void unknownStatus_namesStatusAndListsTheAllowedValues() throws Exception {
+        expectBadParam(mockMvc.perform(get("/tasks").param("status", "FOO")),
+                "status", "must be one of TODO, IN_PROGRESS, DONE");
+    }
+
+    @Test
+    void oneBadValueInARepeatedStatusList_namesStatus() throws Exception {
+        expectBadParam(mockMvc.perform(get("/tasks").param("status", "TODO", "FOO")),
+                "status", "must be one of TODO, IN_PROGRESS, DONE");
+    }
+
+    @Test
+    void oneBadValueInACommaStatusList_namesStatus() throws Exception {
+        expectBadParam(mockMvc.perform(get("/tasks").param("status", "TODO,FOO")),
+                "status", "must be one of TODO, IN_PROGRESS, DONE");
+    }
+
+    @Test
+    void unknownPriority_namesPriorityAndListsTheAllowedValues() throws Exception {
+        expectBadParam(mockMvc.perform(get("/tasks").param("priority", "URGENT")),
+                "priority", "must be one of LOW, MEDIUM, HIGH");
+    }
+
+    @Test
+    void enumValuesAreCaseSensitive() throws Exception {
+        expectBadParam(mockMvc.perform(get("/tasks").param("priority", "high")),
+                "priority", "must be one of LOW, MEDIUM, HIGH");
+    }
+
+    @Test
+    void malformedDates_nameTheParam() throws Exception {
+        // Not a date, a month that does not exist, a day that does not exist in that month, and no zero padding.
+        for (String bad : new String[] {"notadate", "2026-13-01", "2026-02-30", "2026-11-5"}) {
+            expectBadParam(mockMvc.perform(get("/tasks").param("dueAfter", bad)),
+                    "dueAfter", "must be a valid date in yyyy-MM-dd format");
+            expectBadParam(mockMvc.perform(get("/tasks").param("dueBefore", bad)),
+                    "dueBefore", "must be a valid date in yyyy-MM-dd format");
+        }
+    }
+
+    @Test
+    void nonNumericProjectId_namesProjectId() throws Exception {
+        expectBadParam(mockMvc.perform(get("/tasks").param("projectId", "abc")),
+                "projectId", "must be a valid number");
+    }
+
+    @Test
+    void dueAfterLaterThanDueBefore_namesDueAfter() throws Exception {
+        expectBadParam(mockMvc.perform(get("/tasks")
+                        .param("dueAfter", "2026-11-22").param("dueBefore", "2026-11-16")),
+                "dueAfter", "must not be later than dueBefore");
+    }
+
     // ---------- 400 VALIDATION_FAILED: sort ----------
 
     @Test

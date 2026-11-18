@@ -1,5 +1,6 @@
 package dev.jasmeet.taskmanager.task;
 
+import dev.jasmeet.taskmanager.common.FieldViolation;
 import dev.jasmeet.taskmanager.common.InvalidRequestException;
 import dev.jasmeet.taskmanager.common.NotFoundException;
 import dev.jasmeet.taskmanager.common.PageResponse;
@@ -15,6 +16,7 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDate;
@@ -39,6 +41,14 @@ class TaskServiceTest {
 
     @InjectMocks
     TaskService taskService;
+
+    private static final TaskFilter NO_FILTER = new TaskFilter(null, null, null, null, null);
+
+    /** Matches any Specification. Typed here once so the generic cast is not repeated in every test. */
+    @SuppressWarnings("unchecked")
+    private static Specification<Task> anySpecification() {
+        return any(Specification.class);
+    }
 
     private static Project projectWithId(Long id, String name) {
         Project project = new Project(name, null);
@@ -96,13 +106,13 @@ class TaskServiceTest {
     void list_requestsPageWithDefaultSortAndMapsToPageResponse() {
         LocalDate due = LocalDate.of(2026, 12, 1);
         Task task = taskWithId(1L, "A", null, due, Priority.MEDIUM, Status.TODO);
-        when(taskRepository.findAll(any(Pageable.class)))
+        when(taskRepository.findAll(anySpecification(), any(Pageable.class)))
                 .thenReturn(new PageImpl<>(List.of(task), PageRequest.of(1, 2), 3));
 
-        PageResponse<TaskResponse> response = taskService.list(1, 2, List.of());
+        PageResponse<TaskResponse> response = taskService.list(NO_FILTER, 1, 2, List.of());
 
         ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
-        verify(taskRepository).findAll(pageable.capture());
+        verify(taskRepository).findAll(anySpecification(), pageable.capture());
         assertThat(pageable.getValue().getPageNumber()).isEqualTo(1);
         assertThat(pageable.getValue().getPageSize()).isEqualTo(2);
         // ADR-012 default: dueDate asc, then priority desc (through its rank column), then id asc.
@@ -118,22 +128,45 @@ class TaskServiceTest {
 
     @Test
     void list_customSortReplacesDefaultAndEndsWithId() {
-        when(taskRepository.findAll(any(Pageable.class))).thenReturn(new PageImpl<>(List.of()));
+        when(taskRepository.findAll(anySpecification(), any(Pageable.class))).thenReturn(new PageImpl<>(List.of()));
 
-        taskService.list(0, 20, List.of("priority,desc"));
+        taskService.list(NO_FILTER, 0, 20, List.of("priority,desc"));
 
         ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
-        verify(taskRepository).findAll(pageable.capture());
+        verify(taskRepository).findAll(anySpecification(), pageable.capture());
         assertThat(pageable.getValue().getSort()).isEqualTo(Sort.by(
                 Sort.Order.desc("priorityRank"), Sort.Order.asc("id")));
     }
 
     @Test
     void list_invalidSort_throwsAndNeverQueries() {
-        assertThatThrownBy(() -> taskService.list(0, 20, List.of("title")))
+        assertThatThrownBy(() -> taskService.list(NO_FILTER, 0, 20, List.of("title")))
                 .isInstanceOf(InvalidRequestException.class);
 
-        verify(taskRepository, never()).findAll(any(Pageable.class));
+        verify(taskRepository, never()).findAll(anySpecification(), any(Pageable.class));
+    }
+
+    @Test
+    void list_dueAfterLaterThanDueBefore_throwsNamingDueAfter_andNeverQueries() {
+        TaskFilter backwards = new TaskFilter(null, null, null,
+                LocalDate.of(2026, 11, 22), LocalDate.of(2026, 11, 16));
+
+        assertThatThrownBy(() -> taskService.list(backwards, 0, 20, List.of()))
+                .isInstanceOfSatisfying(InvalidRequestException.class, ex ->
+                        assertThat(ex.getFieldErrors()).containsExactly(
+                                new FieldViolation("dueAfter", "must not be later than dueBefore")));
+
+        verify(taskRepository, never()).findAll(anySpecification(), any(Pageable.class));
+    }
+
+    @Test
+    void list_equalDates_areAValidRangeMeaningExactlyThatDay() {
+        when(taskRepository.findAll(anySpecification(), any(Pageable.class))).thenReturn(new PageImpl<>(List.of()));
+        LocalDate day = LocalDate.of(2026, 11, 20);
+
+        taskService.list(new TaskFilter(null, null, null, day, day), 0, 20, List.of());
+
+        verify(taskRepository).findAll(anySpecification(), any(Pageable.class));
     }
 
     @Test
@@ -178,7 +211,8 @@ class TaskServiceTest {
 
         assertThatThrownBy(() -> taskService.delete(99L)).isInstanceOf(NotFoundException.class);
 
-        verify(taskRepository, never()).delete(any());
+        // any(Task.class), not any(): JpaSpecificationExecutor adds a delete(Specification) overload.
+        verify(taskRepository, never()).delete(any(Task.class));
     }
 
     // ---------- project assignment ----------

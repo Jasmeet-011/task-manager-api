@@ -4,6 +4,8 @@ import dev.jasmeet.taskmanager.common.PageResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.format.annotation.DateTimeFormat.ISO;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -18,6 +20,7 @@ import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import java.net.URI;
+import java.time.LocalDate;
 import java.util.List;
 
 /** HTTP only: bind and validate input, call one service method, return a DTO. */
@@ -45,13 +48,21 @@ public class TaskController {
 
     @GetMapping
     public PageResponse<TaskResponse> list(
+            // A List binds both ?status=TODO&status=DONE and ?status=TODO,DONE. A bad value in either form
+            // fails the conversion, and the handler turns that into a 400 naming the param.
+            @RequestParam(required = false) List<Status> status,
+            @RequestParam(required = false) List<Priority> priority,
+            @RequestParam(required = false) Long projectId,
+            @RequestParam(required = false) @DateTimeFormat(iso = ISO.DATE) LocalDate dueAfter,
+            @RequestParam(required = false) @DateTimeFormat(iso = ISO.DATE) LocalDate dueBefore,
             @RequestParam(defaultValue = "0") @Min(0) int page,
             @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size,
             WebRequest webRequest) {
         // Read "sort" raw. A List<String> @RequestParam would split a single "priority,desc" on the comma,
         // but not when sort is repeated, so the two forms would parse differently.
         String[] sort = webRequest.getParameterValues("sort");
-        return taskService.list(page, size, sort == null ? List.of() : List.of(sort));
+        TaskFilter filter = new TaskFilter(status, priority, projectId, dueAfter, dueBefore);
+        return taskService.list(filter, page, size, sort == null ? List.of() : List.of(sort));
     }
 
     @GetMapping("/{id}")

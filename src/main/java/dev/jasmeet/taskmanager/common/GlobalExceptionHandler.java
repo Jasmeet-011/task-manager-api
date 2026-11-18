@@ -31,6 +31,7 @@ import java.net.URI;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
@@ -113,8 +114,15 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         String field = ex instanceof MethodArgumentTypeMismatchException mismatch
                 ? mismatch.getName()
                 : ex.getPropertyName();
+        Class<?> target = ex.getRequiredType();
+        // For a List<Status> param the required type is List. The message should name the element type,
+        // so "must be one of TODO, IN_PROGRESS, DONE" is shown and not "has an invalid value".
+        if (ex instanceof MethodArgumentTypeMismatchException mismatch && target != null
+                && (Collection.class.isAssignableFrom(target) || target.isArray())) {
+            target = mismatch.getParameter().nested().getNestedParameterType();
+        }
         FieldViolation violation = new FieldViolation(
-                field != null ? field : "parameter", invalidValueMessage(ex.getRequiredType()));
+                field != null ? field : "parameter", invalidValueMessage(target));
         return validationFailed(ex, headers, List.of(violation), request);
     }
 
