@@ -41,6 +41,12 @@ public class Task {
     @Column(nullable = false)
     private Priority priority;
 
+    // Internal sort key: Priority.rank() (LOW=1, MEDIUM=2, HIGH=3). The priority column holds text, which
+    // sorts alphabetically (HIGH, LOW, MEDIUM). Only assign() writes this field, in the same step as
+    // priority, so the two cannot drift apart. No getter, and it is never part of TaskResponse.
+    @Column(name = "priority_rank", nullable = false)
+    private int priorityRank;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private Status status;
@@ -81,6 +87,7 @@ public class Task {
         this.description = description;
         this.dueDate = dueDate;
         this.priority = priority;
+        this.priorityRank = priority.rank();
         this.status = status;
     }
 
