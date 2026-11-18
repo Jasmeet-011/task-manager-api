@@ -15,8 +15,9 @@ public record TaskResponse(
         String projectName) {
 
     public static TaskResponse from(Task task) {
-        // task.getProject() is a lazy proxy. getId() needs no query, but getName() loads the project
-        // with one SELECT. In TaskService.list this runs once per task: the N+1 that M4 fixes.
+        // task.getProject() can be a lazy proxy. getId() needs no query, but getName() loads the project
+        // with one SELECT. The list query fetches the project in the same SELECT (see TaskRepository), so
+        // the list pays nothing extra. get, update and the assign endpoints still pay that one SELECT.
         Project project = task.getProject();
         return new TaskResponse(
                 task.getId(),

@@ -113,7 +113,7 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 - **Limits: title up to 200 characters, description up to 2000.** The `@Size` annotations and the `@Column(length)` on `Task` use the same constants (`Task.TITLE_MAX`, `Task.DESCRIPTION_MAX`), so a value cannot pass validation and then fail in the database. Violations say "must be at most N characters".
 - **Unknown JSON properties are ignored** (Boot's default). Tolerant reader: clients don't break if we add fields.
 - **A number is rejected for an enum field.** Jackson 3 maps `"priority": 1` to MEDIUM by position unless `spring.jackson.datatype.enum.fail-on-numbers-for-enums=true`. We turn it on, so it returns 400 `VALIDATION_FAILED` naming the field.
-- **`GET /tasks` takes `page` (default 0, min 0) and `size` (default 20, 1 to 100) only, ordered by id.** This applies ADR-006's default and cap. Sort and filters arrive in M4.
+- **`GET /tasks` takes `page` (default 0, min 0) and `size` (default 20, 1 to 100).** This applies ADR-006's default and cap. A `size` above 100 is a 400, not clamped. *(Amended in M4: the id-only order was replaced by the default sort in ADR-012, which keeps id as the last sort key. Filters and `sort` are in ADR-012.)*
 - **Tradeoff:** a client that wants to change one field must resend the others. The UI does that. Unknown properties are not reported, so a misspelled optional field is silently dropped.
 
 ### ADR-011: Projects, unique names and task assignment (M3)
@@ -133,7 +133,7 @@ Builds on ADR-002 (unidirectional, lazy, no cascade).
   - A missing task or project is 404 `NOT_FOUND`. The task is looked up first, and the detail names whichever is missing.
 - **`GET /projects` is a plain list ordered by id, with no pagination.** We expect few projects. `GET /projects/{id}` exists so the `Location` header on the 201 points at something.
 - **`TaskResponse` gains `projectId` and `projectName`** (null when unassigned).
-- **N+1, known and left for M4.** `TaskService.list` maps each task through `TaskResponse.from`, which reads `project.getName()` and loads the lazy project. Measured: 3 tasks in 2 projects gave 1 task SELECT plus 2 project SELECTs, so one per distinct project. M4 fixes it by fetching the project in the same query. `get` and `update` pay one extra SELECT each.
+- **N+1, known and left for M4.** `TaskService.list` maps each task through `TaskResponse.from`, which reads `project.getName()` and loads the lazy project. Measured: 3 tasks in 2 projects gave 1 task SELECT plus 2 project SELECTs, so one per distinct project. M4 fixes it by fetching the project in the same query. `get` and `update` pay one extra SELECT each. *(Fixed for the list in M4, see ADR-012. `get`, `update` and the assign endpoints still pay that one extra SELECT.)*
 - **No project deletion.** Deleting a project raises the question of what happens to its tasks, and that should be decided on purpose. This overrides the earlier pending lean ("support it, unassign tasks"). Next steps, each needing its own decision:
   - `DELETE /projects/{id}` and what happens to its tasks: unassign them, block the delete while tasks exist, or cascade (the CLAUDE.md trap).
   - Project update (`PUT /projects/{id}`), which needs a version check once projects can change.
@@ -141,17 +141,62 @@ Builds on ADR-002 (unidirectional, lazy, no cascade).
   - Pagination of `GET /projects` if the list grows.
 - **Tradeoff:** a project cannot be renamed or removed through the API. Case-variant names can coexist. The list endpoint returns everything.
 
+### ADR-012: Filtering, sorting and pagination on `GET /tasks` (M4)
+
+Builds on ADR-006 (page/size, `PageResponse`) and ADR-010 (size 1 to 100). Every error below is 400 `VALIDATION_FAILED` with the param named in `fieldErrors`, so ADR-005 needs no new code.
+
+**Priority sorts by meaning, through a rank column**
+- `Task` has a `priority_rank` column (`LOW`=1, `MEDIUM`=2, `HIGH`=3). Each `Priority` constant carries its rank explicitly. It is never `ordinal()`, because reordering the enum would silently change what is already stored.
+- `Task.assign(...)` sets the rank in the same step as the priority, and it is the only writer. There is no getter, and the rank is not in `TaskResponse`.
+- The client sorts by `priority`. `TaskSort` translates that to the `priorityRank` property, so it works through a normal `Pageable`. Sorting the text column would give HIGH, LOW, MEDIUM. A CASE expression cannot be expressed through `Sort` with Specifications.
+- **Tradeoff:** one more column, kept in sync by code and not by the database. Nothing stops a future write path that skips `assign`.
+
+**Filters: `status`, `priority`, `projectId`, `dueAfter`, `dueBefore`**
+- `status` and `priority` take several values. OR within one filter, AND across filters. Both `?status=TODO&status=DONE` and `?status=TODO,DONE` work and give the same result. Spring binds both forms into a `List`.
+- Enum values are case-sensitive (`high` is a 400). A trailing comma is ignored (`?status=DONE,`).
+- `projectId` is a filter, not a lookup. An unknown id returns 200 with an empty page, never 404.
+- **A blank value means "not supplied"** for every param (`?status=`, `?dueAfter=`, `?sort=`). Anything non-blank must be valid.
+- Each filter is one small `Specification` in `TaskSpecifications`, combined with `Specification.allOf`. A filter that was not supplied adds no condition.
+
+**Date range: inclusive on both ends**
+- `dueAfter=2026-11-16&dueBefore=2026-11-22` includes both edge dates. Either one works alone. Equal dates mean "due exactly that day".
+- **Naming caveat:** "after" and "before" read as exclusive, but these are inclusive. The README and the error messages say so. The names come from the assignment spec.
+- Format is strict `yyyy-MM-dd`. `2026-02-30`, `2026-13-01` and `2026-11-5` are all 400.
+- `dueAfter` later than `dueBefore` is a 400 naming `dueAfter` ("must not be later than dueBefore"). It is almost certainly swapped dates, and an empty list would hide the mistake. The check is in `TaskService`.
+
+**Sorting: `sort=field[,asc|desc]`, repeatable**
+- Allowed fields are `dueDate` and `priority`. Anything else (`title`, `id`, `priorityRank`) is a 400. The direction is case-insensitive, the field name is not. The same field twice is a 400.
+- **Default, with no `sort`:** `dueDate` ascending, then priority descending, then id ascending. This answers "what should I do next": deadlines first, urgency breaks ties.
+- **A client sort replaces the default.** `id` ascending is always appended as the last key. Without it, rows that tie on every other key could repeat or vanish across pages. `dueDate` is `NOT NULL`, so where nulls sort is not a question.
+- **Strict parser, not Spring's.** Spring Data's resolver is lenient (probed on 4.1.2): `priority,foo` becomes two ascending sorts, `dueDate,desc,priority` becomes three, and `,desc` is silently ignored. `TaskSort` rejects each of those with a 400 naming `sort`, and reports every bad entry. The result still goes through a normal `PageRequest`.
+- The controller reads `sort` raw (`WebRequest.getParameterValues`). A `List<String>` `@RequestParam` splits a single `priority,desc` on the comma but not a repeated `sort`, so the two forms would parse differently. Confirmed in M4 by temporarily binding a `List<String>`: the sort integration tests then returned 400. The existing single-value `sort=priority,desc` tests guard against that change.
+- `page` and `size` stay as validated `@RequestParam` ints, not a `Pageable` argument. A `Pageable` argument would clamp `size` and ignore `page=abc` instead of returning 400.
+
+**No N+1**
+- `TaskRepository.findAll(spec, pageable)` has `@EntityGraph(attributePaths = "project")`, so the project comes in the same SELECT as a LEFT JOIN. The project stays LAZY everywhere else. The join is to-one, so paging stays in SQL.
+- Measured with the SQL log: one SELECT with the join, one `count`, and no per-project SELECTs. A regression test counts the statements and checks they do not grow with the number of distinct projects.
+
+**Where each validation lives**
+
+| Bad input | Caught by | `fieldErrors.field` |
+|-----------|-----------|---------------------|
+| Unknown enum, including inside a list | Spring conversion, then `GlobalExceptionHandler.handleTypeMismatch` | `status` or `priority` |
+| Malformed or impossible date, non-numeric `projectId`, `page` or `size` | same | the param name |
+| `page` below 0, `size` outside 1 to 100 | `@Min` and `@Max` | `page` or `size` |
+| `dueAfter` later than `dueBefore` | `TaskService`, throws `InvalidRequestException` | `dueAfter` |
+| Bad sort field, direction, shape or duplicate | `TaskSort`, throws `InvalidRequestException` | `sort` |
+
+- `InvalidRequestException` is new in `common/`. It is for checks only a service can make, and it maps to the same 400 as Bean Validation.
+- `handleTypeMismatch` now reads the element type of a `List` param. Before, the required type was `List`, and the message would have been "has an invalid value" and not "must be one of TODO, IN_PROGRESS, DONE".
+- **Known limits.** Conversion errors are reported one param at a time, the first that fails. The range and sort checks run after binding, so with both a bad range and a bad sort only the range is reported.
+
+**Settled from the M4 pending list:** rank column and not CASE. Inclusive range. Multi-value filters (the earlier lean was single-value). `size` above the max is a 400 (already decided in ADR-010). Null `dueDate` placement does not apply. `dueAfter` later than `dueBefore` is a 400.
+
+- **Tradeoff:** offset paging can still repeat or skip rows if data changes between requests (ADR-006). The id tiebreaker only makes a fixed data set stable. The date param names read as exclusive but are inclusive. `get`, `update` and the assign endpoints still pay one extra SELECT for the project.
+
 ---
 
 ## Pending (settle in the milestone session, then move up)
-
-**M4**
-- How to sort priority correctly: a rank column derived from the enum, or a CASE expression in the query.
-- Inclusive or exclusive date range. (Lean: inclusive on both ends.)
-- Single-value or multi-value filters. (Lean: single value.)
-- `size` above the max: return 400, or clamp to the max?
-- Where null `dueDate` values go when sorting. (Lean: last.)
-- `dueAfter` later than `dueBefore` returns 400?
 
 **M5**
 - Prompt-only JSON or tool use with a forced schema.

@@ -32,20 +32,35 @@ JSON body → CreateTaskRequest (@Valid)
 
 ## List tasks: `GET /tasks?status=&priority=&dueAfter=&dueBefore=&projectId=&page=&size=&sort=`
 
-As built in M2, only `page` (default 0) and `size` (default 20, 1 to 100) exist, ordered by id. Bad values return 400 VALIDATION_FAILED naming the param. The filters and `sort` below arrive in M4.
-
-As built in M3, each `TaskResponse` carries `projectId` and `projectName`, and the project is NOT fetched in the same query yet. `TaskResponse.from` reads the project name through the lazy proxy, so a page costs 1 task query plus 1 query per distinct project on it (N+1, measured). M4 fixes this.
+As built in M4 (ADR-012). All params are optional and combine. A blank value means "not supplied".
 
 ```
-query params → filter values + Pageable
-  bad enum / date / sort field / size → 400 VALIDATION_FAILED naming the param
-→ TaskService.list
-  build Specification: AND of each non-null filter
-  translate sort (priority uses its rank, not its name)
-  repository.findAll(spec, pageable), project fetched in the same query
-  map Page<Task> → PageResponse<TaskResponse>
+query params
+→ TaskController.list            Spring binds and converts the params
+    status, priority   List of enum   ?status=TODO&status=DONE  or  ?status=TODO,DONE (same result)
+    projectId          Long
+    dueAfter, dueBefore LocalDate     strict yyyy-MM-dd
+    page (default 0, min 0), size (default 20, 1 to 100)      @Min / @Max
+    sort               read raw from the request (a List param would split "priority,desc" on the comma)
+  bad enum (also inside a list) / bad date / non-numeric number / page or size out of range
+                                   → 400 VALIDATION_FAILED naming that param (first failing param only)
+  builds a TaskFilter record
+→ TaskService.list(filter, page, size, sort)
+  dueAfter later than dueBefore    → InvalidRequestException → 400 VALIDATION_FAILED, field dueAfter
+  TaskSort.resolve(sort)
+    nothing supplied               → dueDate asc, priority desc (priorityRank), id asc
+    supplied                       → each entry checked: field in {dueDate, priority}, direction asc|desc,
+                                     no duplicate field; priority becomes priorityRank; id asc appended last
+    any bad entry                  → InvalidRequestException → 400 VALIDATION_FAILED, field sort
+  TaskSpecifications.from(filter)  AND of one Specification per supplied filter
+                                   (OR inside status and priority, dates inclusive on both ends)
+  taskRepository.findAll(spec, PageRequest)
+→ Repository (Hibernate → H2)      @EntityGraph("project"): ONE SELECT with LEFT JOIN projects, plus a count
+  map Page<Task> → PageResponse<TaskResponse> inside the transaction (no extra SELECTs)
 → 200 { content, page, size, totalElements, totalPages }
 ```
+
+An unknown `projectId` is a filter that matches nothing: 200 with an empty page, never 404. Measured with the SQL log in M4: a page of tasks in 3 different projects ran one task-plus-project SELECT and one count, and no per-project SELECTs (the N+1 seen in M3 is gone). The rank column `priority_rank` is internal and never appears in the response.
 
 ## Update a task: `PUT /tasks/{id}` (with optimistic locking from M6)
 
