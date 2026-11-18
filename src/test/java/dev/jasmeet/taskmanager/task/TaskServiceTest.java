@@ -1,5 +1,6 @@
 package dev.jasmeet.taskmanager.task;
 
+import dev.jasmeet.taskmanager.common.InvalidRequestException;
 import dev.jasmeet.taskmanager.common.NotFoundException;
 import dev.jasmeet.taskmanager.common.PageResponse;
 import dev.jasmeet.taskmanager.project.Project;
@@ -92,25 +93,47 @@ class TaskServiceTest {
     }
 
     @Test
-    void list_requestsPageSortedByIdAndMapsToPageResponse() {
+    void list_requestsPageWithDefaultSortAndMapsToPageResponse() {
         LocalDate due = LocalDate.of(2026, 12, 1);
         Task task = taskWithId(1L, "A", null, due, Priority.MEDIUM, Status.TODO);
         when(taskRepository.findAll(any(Pageable.class)))
                 .thenReturn(new PageImpl<>(List.of(task), PageRequest.of(1, 2), 3));
 
-        PageResponse<TaskResponse> response = taskService.list(1, 2);
+        PageResponse<TaskResponse> response = taskService.list(1, 2, List.of());
 
         ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
         verify(taskRepository).findAll(pageable.capture());
         assertThat(pageable.getValue().getPageNumber()).isEqualTo(1);
         assertThat(pageable.getValue().getPageSize()).isEqualTo(2);
-        assertThat(pageable.getValue().getSort()).isEqualTo(Sort.by("id"));
+        // ADR-012 default: dueDate asc, then priority desc (through its rank column), then id asc.
+        assertThat(pageable.getValue().getSort()).isEqualTo(Sort.by(
+                Sort.Order.asc("dueDate"), Sort.Order.desc("priorityRank"), Sort.Order.asc("id")));
 
         assertThat(response.content()).containsExactly(TaskResponse.from(task));
         assertThat(response.page()).isEqualTo(1);
         assertThat(response.size()).isEqualTo(2);
         assertThat(response.totalElements()).isEqualTo(3);
         assertThat(response.totalPages()).isEqualTo(2);
+    }
+
+    @Test
+    void list_customSortReplacesDefaultAndEndsWithId() {
+        when(taskRepository.findAll(any(Pageable.class))).thenReturn(new PageImpl<>(List.of()));
+
+        taskService.list(0, 20, List.of("priority,desc"));
+
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
+        verify(taskRepository).findAll(pageable.capture());
+        assertThat(pageable.getValue().getSort()).isEqualTo(Sort.by(
+                Sort.Order.desc("priorityRank"), Sort.Order.asc("id")));
+    }
+
+    @Test
+    void list_invalidSort_throwsAndNeverQueries() {
+        assertThatThrownBy(() -> taskService.list(0, 20, List.of("title")))
+                .isInstanceOf(InvalidRequestException.class);
+
+        verify(taskRepository, never()).findAll(any(Pageable.class));
     }
 
     @Test

@@ -5,9 +5,10 @@ import dev.jasmeet.taskmanager.common.PageResponse;
 import dev.jasmeet.taskmanager.project.Project;
 import dev.jasmeet.taskmanager.project.ProjectRepository;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
 
 @Service
 @Transactional(readOnly = true)
@@ -38,11 +39,10 @@ public class TaskService {
         return TaskResponse.from(findOrThrow(id));
     }
 
-    public PageResponse<TaskResponse> list(int page, int size) {
-        // Fixed sort by id keeps paging stable. Sorting and filters arrive in M4.
-        // N+1 (M4): the .map below reads each task's project name, one SELECT per distinct project.
-        // M4 fixes it by fetching the project in the same query.
-        PageRequest pageRequest = PageRequest.of(page, size, Sort.by("id"));
+    /** @param sort the raw values of the "sort" param. TaskSort validates them and adds the default and the id tiebreaker. */
+    public PageResponse<TaskResponse> list(int page, int size, List<String> sort) {
+        // N+1 (fixed later in M4): the .map below reads each task's project name, one SELECT per distinct project.
+        PageRequest pageRequest = PageRequest.of(page, size, TaskSort.resolve(sort));
         return PageResponse.from(taskRepository.findAll(pageRequest).map(TaskResponse::from));
     }
 

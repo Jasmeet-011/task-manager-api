@@ -14,9 +14,11 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import java.net.URI;
+import java.util.List;
 
 /** HTTP only: bind and validate input, call one service method, return a DTO. */
 @RestController
@@ -44,8 +46,12 @@ public class TaskController {
     @GetMapping
     public PageResponse<TaskResponse> list(
             @RequestParam(defaultValue = "0") @Min(0) int page,
-            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size) {
-        return taskService.list(page, size);
+            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size,
+            WebRequest webRequest) {
+        // Read "sort" raw. A List<String> @RequestParam would split a single "priority,desc" on the comma,
+        // but not when sort is repeated, so the two forms would parse differently.
+        String[] sort = webRequest.getParameterValues("sort");
+        return taskService.list(page, size, sort == null ? List.of() : List.of(sort));
     }
 
     @GetMapping("/{id}")

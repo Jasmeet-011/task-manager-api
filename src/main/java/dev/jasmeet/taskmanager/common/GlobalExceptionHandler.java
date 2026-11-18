@@ -74,6 +74,12 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
                 ex.getCode(), ex.getFieldErrors(), request);
     }
 
+    /** A service rejected the request (e.g. a sort field that is not allowed). Same 400 as Bean Validation. */
+    @ExceptionHandler(InvalidRequestException.class)
+    public ResponseEntity<Object> handleInvalidRequest(InvalidRequestException ex, WebRequest request) {
+        return validationFailed(ex, null, ex.getFieldErrors(), request);
+    }
+
     // ---------- 400: validation and unreadable input ----------
 
     /** Bean Validation failures on a request body. Every failing field is listed. */

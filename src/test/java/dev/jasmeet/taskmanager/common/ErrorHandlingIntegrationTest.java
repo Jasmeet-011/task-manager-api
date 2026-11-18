@@ -247,6 +247,50 @@ class ErrorHandlingIntegrationTest {
                 .andExpect(jsonPath("$.fieldErrors[0].message").value("must be a valid number"));
     }
 
+    // ---------- 400 VALIDATION_FAILED: sort ----------
+
+    @Test
+    void sortOnAFieldThatIsNotAllowed_namesSort() throws Exception {
+        // title and id are real columns but not whitelisted. priorityRank is the internal column behind "priority".
+        for (String field : new String[] {"title", "id", "priorityRank"}) {
+            expectProblem(mockMvc.perform(get("/tasks").param("sort", field)), 400, "VALIDATION_FAILED", "/tasks")
+                    .andExpect(jsonPath("$.fieldErrors[0].field").value("sort"))
+                    .andExpect(jsonPath("$.fieldErrors[0].message")
+                            .value("unknown sort field '" + field + "', must be one of dueDate, priority"));
+        }
+    }
+
+    @Test
+    void sortWithABadDirection_namesSort() throws Exception {
+        expectProblem(mockMvc.perform(get("/tasks").param("sort", "priority,sideways")),
+                400, "VALIDATION_FAILED", "/tasks")
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("sort"))
+                .andExpect(jsonPath("$.fieldErrors[0].message")
+                        .value("invalid sort direction 'sideways', must be asc or desc"));
+    }
+
+    @Test
+    void malformedSortValues_nameSort() throws Exception {
+        for (String value : new String[] {"priority,desc,asc", ",desc", "priority,"}) {
+            expectProblem(mockMvc.perform(get("/tasks").param("sort", value)), 400, "VALIDATION_FAILED", "/tasks")
+                    .andExpect(jsonPath("$.fieldErrors[0].field").value("sort"));
+        }
+    }
+
+    @Test
+    void sameSortFieldTwice_namesSort() throws Exception {
+        expectProblem(mockMvc.perform(get("/tasks").param("sort", "priority,asc", "priority,desc")),
+                400, "VALIDATION_FAILED", "/tasks")
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("sort"));
+    }
+
+    @Test
+    void oneBadSortAmongGoodOnes_isStillRejected() throws Exception {
+        expectProblem(mockMvc.perform(get("/tasks").param("sort", "priority,desc", "title")),
+                400, "VALIDATION_FAILED", "/tasks")
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("sort"));
+    }
+
     // ---------- 404 ----------
 
     @Test
