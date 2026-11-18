@@ -34,6 +34,8 @@ JSON body → CreateTaskRequest (@Valid)
 
 As built in M2, only `page` (default 0) and `size` (default 20, 1 to 100) exist, ordered by id. Bad values return 400 VALIDATION_FAILED naming the param. The filters and `sort` below arrive in M4.
 
+As built in M3, each `TaskResponse` carries `projectId` and `projectName`, and the project is NOT fetched in the same query yet. `TaskResponse.from` reads the project name through the lazy proxy, so a page costs 1 task query plus 1 query per distinct project on it (N+1, measured). M4 fixes this.
+
 ```
 query params → filter values + Pageable
   bad enum / date / sort field / size → 400 VALIDATION_FAILED naming the param
@@ -57,14 +59,50 @@ JSON body → UpdateTaskRequest (@Valid, version required)
 → 200 TaskResponse (version incremented)
 ```
 
-## Associate a task with a project (M3)
+## Create a project: `POST /projects` (M3)
 
 ```
-(shape decided in M3)
-load task and project               either missing → 404 NOT_FOUND
-set task.project (or null to unassign)
-→ 200 TaskResponse with projectId and projectName
+JSON body → CreateProjectRequest (@Valid)
+  blank name, name over 100, description over 500 → 400 VALIDATION_FAILED with fieldErrors
+  invalid JSON syntax or empty body               → 400 MALFORMED_REQUEST
+→ ProjectService.create
+  trim the name
+  projectRepository.saveAndFlush      the INSERT runs here, inside the try block
+    violates uk_projects_name         → catch DataIntegrityViolationException
+                                        constraint name matches  → ConflictException → 409 DUPLICATE_PROJECT_NAME
+                                                                   fieldErrors [{ name, "already exists" }]
+                                        any other violation      → rethrown → logged 500 INTERNAL_ERROR
+→ 201 Created, Location: /projects/{id}, body ProjectResponse
 ```
+
+Why `saveAndFlush`: a flush left for commit time would throw after the service method returned, outside the catch, and become a 500. Uniqueness is enforced only by the database, so two concurrent requests with the same name give one 201 and one 409.
+
+## List and get projects: `GET /projects`, `GET /projects/{id}` (M3)
+
+```
+GET /projects        → ProjectService.list → 200 plain JSON array, ordered by id, no pagination
+GET /projects/{id}   → ProjectService.get  → 200 ProjectResponse
+                         missing → 404 NOT_FOUND, non-numeric → 400 VALIDATION_FAILED
+```
+
+## Assign and unassign a task (M3)
+
+```
+PUT /tasks/{id}/project/{projectId}
+→ TaskService.assignProject
+  load task                          missing → 404 NOT_FOUND "Task N not found"
+  load project                       missing → 404 NOT_FOUND "Project N not found" (task left unchanged)
+  task.moveTo(project)               moves it if it was elsewhere; same project again = no change, no UPDATE
+→ 200 TaskResponse with projectId and projectName
+
+DELETE /tasks/{id}/project
+→ TaskService.unassignProject
+  load task                          missing → 404 NOT_FOUND
+  task.removeFromProject()           already none = fine
+→ 204 No Content
+```
+
+`PUT /tasks/{id}` never touches the project. Only `moveTo` and `removeFromProject` change it.
 
 ## AI suggestion: `POST /tasks/suggest`
 

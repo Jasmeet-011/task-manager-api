@@ -79,13 +79,14 @@ If time gets tight, M7 can be trimmed to the bare requirements. M8 is never skip
 **Build**
 - `Project` entity (`id`, `name` required, `description` optional), unidirectional `@ManyToOne` from Task, no cascade.
 - `POST /projects` (201), `GET /projects`, `GET /projects/{id}`.
-- Associate and disassociate a task (shape per the pending M3 decision).
+- Associate and disassociate a task: `PUT /tasks/{id}/project/{projectId}` and `DELETE /tasks/{id}/project` (ADR-011).
 - `TaskResponse` gains `projectId` and `projectName` (null when unassigned).
-- Delete behavior per the pending M3 decision.
+- Unique project names, enforced by the database (409 `DUPLICATE_PROJECT_NAME`).
+- No project deletion (see ADR-011, listed as a next step).
 
 **Tests**
 - Unit tests for every `ProjectService` method and any new `TaskService` methods.
-- Integration tests: create and list projects, assign, unassign, 404 for a missing project or task.
+- Integration tests: create and list projects, assign, unassign, 404 for a missing project or task, 409 for a duplicate name (including two concurrent requests).
 
 ## M4: Filtering, sorting, pagination
 

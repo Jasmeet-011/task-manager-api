@@ -67,8 +67,10 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 | `METHOD_NOT_ALLOWED` | 405 | Wrong HTTP method. The `Allow` header is kept. (Added in M2) |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | Request Content-Type is not supported. (Added in M2) |
 | `CLIENT_ERROR` | 4xx | Fallback for a 4xx status with no specific code above, e.g. 406. (Added in M2) |
+| `DUPLICATE_PROJECT_NAME` | 409 | A project with that name already exists. Carries `fieldErrors: [{ "field": "name", "message": "already exists" }]`. (Added in M3) |
 
-- **Amended in M2:** the last three rows were added so that every status Spring MVC can produce has a stable code. `type` is always `"about:blank"` and is set explicitly, because Spring leaves it out of the JSON otherwise.
+- **Amended in M2:** the three rows before `DUPLICATE_PROJECT_NAME` were added so that every status Spring MVC can produce has a stable code. `type` is always `"about:blank"` and is set explicitly, because Spring leaves it out of the JSON otherwise.
+- **Amended in M3:** `DUPLICATE_PROJECT_NAME` was added (ADR-011). It is specific, like `VERSION_CONFLICT`, so a client can switch on it. The 409 lists `name` in `fieldErrors` because a specific field failed.
 - **Known limit:** errors Tomcat rejects before Spring MVC runs (malformed URLs such as `/tasks/%`) return Tomcat's HTML 400 page, not this body. It leaks no stack trace or message. Optional M8 item.
 
 - **Why:** A real standard that's built into Spring, with one shape for every error and field-level detail where it matters.
@@ -114,14 +116,34 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 - **`GET /tasks` takes `page` (default 0, min 0) and `size` (default 20, 1 to 100) only, ordered by id.** This applies ADR-006's default and cap. Sort and filters arrive in M4.
 - **Tradeoff:** a client that wants to change one field must resend the others. The UI does that. Unknown properties are not reported, so a misspelled optional field is silently dropped.
 
+### ADR-011: Projects, unique names and task assignment (M3)
+
+Builds on ADR-002 (unidirectional, lazy, no cascade).
+
+- **Fields.** `name` is required, up to 100 characters. `description` is optional, up to 500. The `@Size` annotations and the `@Column(length)` on `Project` use the same constants (`Project.NAME_MAX`, `Project.DESCRIPTION_MAX`). The name is trimmed in the service before it is saved.
+- **Unique names, enforced by the database.** The `projects` table has a named constraint, `uk_projects_name`. There is no check-then-insert, because two concurrent requests could both pass the check. Only the database can guarantee uniqueness.
+  - `ProjectService.create` calls `saveAndFlush` inside its `try` block, so the INSERT runs where the violation can be caught. A flush left for commit time would throw after the method returned, outside the catch, and become a 500. (With `IDENTITY` ids Hibernate inserts immediately anyway, but correctness should not depend on the ID strategy.)
+  - The catch recognises a duplicate **by constraint name**, not by "any unique violation". A unique constraint added later would otherwise be mislabelled as a duplicate project name. Any other integrity violation is rethrown and reaches the logged 500 handler.
+  - H2 reports the name decorated (`PUBLIC.UK_PROJECTS_NAME INDEX PUBLIC.UK_PROJECTS_NAME_INDEX_F`). `bareConstraintName` keeps the first word and drops the schema prefix, and the result is compared for equality, never with `contains`, so `uk_projects_name_other` does not match.
+  - The service throws a generic `ConflictException(code, message, fieldErrors)`, which the handler maps to 409. M6's `VERSION_CONFLICT` reuses it.
+- **Names are case-sensitive.** "Home" and "home" can coexist. Case-insensitive uniqueness needs either an H2-only column type (`VARCHAR_IGNORECASE`, not portable) or an extra lowercase key column. Documented limit, and a test records it.
+- **Assignment has its own endpoints, and `PUT /tasks/{id}` never touches the project.** `Task` has `moveTo(Project)` and `removeFromProject()` and nothing else changes the project. A `projectId` in a PUT body is ignored like any other unknown property (ADR-010).
+  - `PUT /tasks/{id}/project/{projectId}` sets the project, moves the task if it was in another one, and returns 200 with `TaskResponse`. Repeating the call changes nothing (Hibernate sees no difference, so it runs no UPDATE).
+  - `DELETE /tasks/{id}/project` returns 204, also when the task had no project. The caller's goal is already met, so there is nothing to fail on.
+  - A missing task or project is 404 `NOT_FOUND`. The task is looked up first, and the detail names whichever is missing.
+- **`GET /projects` is a plain list ordered by id, with no pagination.** We expect few projects. `GET /projects/{id}` exists so the `Location` header on the 201 points at something.
+- **`TaskResponse` gains `projectId` and `projectName`** (null when unassigned).
+- **N+1, known and left for M4.** `TaskService.list` maps each task through `TaskResponse.from`, which reads `project.getName()` and loads the lazy project. Measured: 3 tasks in 2 projects gave 1 task SELECT plus 2 project SELECTs, so one per distinct project. M4 fixes it by fetching the project in the same query. `get` and `update` pay one extra SELECT each.
+- **No project deletion.** Deleting a project raises the question of what happens to its tasks, and that should be decided on purpose. This overrides the earlier pending lean ("support it, unassign tasks"). Next steps, each needing its own decision:
+  - `DELETE /projects/{id}` and what happens to its tasks: unassign them, block the delete while tasks exist, or cascade (the CLAUDE.md trap).
+  - Project update (`PUT /projects/{id}`), which needs a version check once projects can change.
+  - Case-insensitive names.
+  - Pagination of `GET /projects` if the list grows.
+- **Tradeoff:** a project cannot be renamed or removed through the API. Case-variant names can coexist. The list endpoint returns everything.
+
 ---
 
 ## Pending (settle in the milestone session, then move up)
-
-**M3**
-- How tasks get associated: dedicated endpoints `PUT /tasks/{id}/project/{projectId}` and `DELETE /tasks/{id}/project` (lean), or `projectId` in the task body.
-- Support `DELETE /projects/{id}`? If so, what happens to its tasks? (Lean: support it, unassign tasks, never delete them.)
-- Must project names be unique?
 
 **M4**
 - How to sort priority correctly: a rank column derived from the enum, or a CASE expression in the query.
@@ -140,7 +162,7 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 
 **M6**
 - Version in the request body (lean) or an `If-Match` header with ETags.
-- Whether assigning or unassigning a project also checks the version.
+- Whether assigning or unassigning a project also checks the version. (Once `@Version` exists, an assignment that changes the project bumps it. A repeated identical assign does not, because Hibernate sees no change.)
 
 **M7**
 - Seed demo data on startup, while keeping tests isolated from it?
