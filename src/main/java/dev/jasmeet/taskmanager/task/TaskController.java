@@ -63,4 +63,15 @@ public class TaskController {
         taskService.delete(id);
         return ResponseEntity.noContent().build();
     }
+
+    @PutMapping("/{id}/project/{projectId}")
+    public TaskResponse assignProject(@PathVariable Long id, @PathVariable Long projectId) {
+        return taskService.assignProject(id, projectId);
+    }
+
+    @DeleteMapping("/{id}/project")
+    public ResponseEntity<Void> unassignProject(@PathVariable Long id) {
+        taskService.unassignProject(id);
+        return ResponseEntity.noContent().build();
+    }
 }

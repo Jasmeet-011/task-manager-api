@@ -2,6 +2,8 @@ package dev.jasmeet.taskmanager.task;
 
 import dev.jasmeet.taskmanager.common.NotFoundException;
 import dev.jasmeet.taskmanager.common.PageResponse;
+import dev.jasmeet.taskmanager.project.Project;
+import dev.jasmeet.taskmanager.project.ProjectRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -31,8 +33,17 @@ class TaskServiceTest {
     @Mock
     TaskRepository taskRepository;
 
+    @Mock
+    ProjectRepository projectRepository;
+
     @InjectMocks
     TaskService taskService;
+
+    private static Project projectWithId(Long id, String name) {
+        Project project = new Project(name, null);
+        ReflectionTestUtils.setField(project, "id", id);
+        return project;
+    }
 
     private static Task taskWithId(Long id, String title, String description,
                                    LocalDate dueDate, Priority priority, Status status) {
@@ -57,7 +68,7 @@ class TaskServiceTest {
         verify(taskRepository).save(saved.capture());
         assertThat(saved.getValue().getStatus()).isEqualTo(Status.TODO);
         assertThat(response).isEqualTo(new TaskResponse(
-                7L, "Write report", "Q4 numbers", due, Priority.HIGH, Status.TODO));
+                7L, "Write report", "Q4 numbers", due, Priority.HIGH, Status.TODO, null, null));
     }
 
     @Test
@@ -68,7 +79,7 @@ class TaskServiceTest {
 
         TaskResponse response = taskService.get(1L);
 
-        assertThat(response).isEqualTo(new TaskResponse(1L, "A", null, due, Priority.LOW, Status.DONE));
+        assertThat(response).isEqualTo(new TaskResponse(1L, "A", null, due, Priority.LOW, Status.DONE, null, null));
     }
 
     @Test
@@ -113,7 +124,7 @@ class TaskServiceTest {
                 new UpdateTaskRequest("New", null, newDue, Priority.HIGH, Status.IN_PROGRESS));
 
         assertThat(response).isEqualTo(new TaskResponse(
-                5L, "New", null, newDue, Priority.HIGH, Status.IN_PROGRESS));
+                5L, "New", null, newDue, Priority.HIGH, Status.IN_PROGRESS, null, null));
         // The managed entity is flushed at commit, so the service must not call save.
         // Whether the change really persists is proven by the PUT integration test.
         verify(taskRepository, never()).save(any());
@@ -145,5 +156,114 @@ class TaskServiceTest {
         assertThatThrownBy(() -> taskService.delete(99L)).isInstanceOf(NotFoundException.class);
 
         verify(taskRepository, never()).delete(any());
+    }
+
+    // ---------- project assignment ----------
+
+    @Test
+    void assignProject_setsProjectAndReturnsItsIdAndName() {
+        LocalDate due = LocalDate.of(2026, 12, 1);
+        Task task = taskWithId(1L, "A", null, due, Priority.LOW, Status.TODO);
+        when(taskRepository.findById(1L)).thenReturn(Optional.of(task));
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(projectWithId(10L, "Home")));
+
+        TaskResponse response = taskService.assignProject(1L, 10L);
+
+        assertThat(response).isEqualTo(new TaskResponse(1L, "A", null, due, Priority.LOW, Status.TODO, 10L, "Home"));
+        assertThat(task.getProject().getId()).isEqualTo(10L);
+    }
+
+    @Test
+    void assignProject_taskAlreadyInAnotherProject_movesIt() {
+        Task task = taskWithId(1L, "A", null, LocalDate.of(2026, 12, 1), Priority.LOW, Status.TODO);
+        task.moveTo(projectWithId(10L, "Home"));
+        when(taskRepository.findById(1L)).thenReturn(Optional.of(task));
+        when(projectRepository.findById(20L)).thenReturn(Optional.of(projectWithId(20L, "Work")));
+
+        TaskResponse response = taskService.assignProject(1L, 20L);
+
+        assertThat(response.projectId()).isEqualTo(20L);
+        assertThat(response.projectName()).isEqualTo("Work");
+    }
+
+    @Test
+    void assignProject_sameProjectTwice_givesTheSameResult() {
+        Project home = projectWithId(10L, "Home");
+        Task task = taskWithId(1L, "A", null, LocalDate.of(2026, 12, 1), Priority.LOW, Status.TODO);
+        when(taskRepository.findById(1L)).thenReturn(Optional.of(task));
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(home));
+
+        TaskResponse first = taskService.assignProject(1L, 10L);
+        TaskResponse second = taskService.assignProject(1L, 10L);
+
+        assertThat(second).isEqualTo(first);
+        assertThat(task.getProject()).isSameAs(home);
+    }
+
+    @Test
+    void assignProject_missingTask_throwsNotFoundWithoutLookingUpTheProject() {
+        when(taskRepository.findById(99L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> taskService.assignProject(99L, 10L))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessage("Task 99 not found");
+
+        verify(projectRepository, never()).findById(any());
+    }
+
+    @Test
+    void assignProject_missingProject_throwsNotFoundAndLeavesTaskUnchanged() {
+        Task task = taskWithId(1L, "A", null, LocalDate.of(2026, 12, 1), Priority.LOW, Status.TODO);
+        when(taskRepository.findById(1L)).thenReturn(Optional.of(task));
+        when(projectRepository.findById(99L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> taskService.assignProject(1L, 99L))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessage("Project 99 not found");
+
+        assertThat(task.getProject()).isNull();
+    }
+
+    @Test
+    void unassignProject_clearsTheProject() {
+        Task task = taskWithId(1L, "A", null, LocalDate.of(2026, 12, 1), Priority.LOW, Status.TODO);
+        task.moveTo(projectWithId(10L, "Home"));
+        when(taskRepository.findById(1L)).thenReturn(Optional.of(task));
+
+        taskService.unassignProject(1L);
+
+        assertThat(task.getProject()).isNull();
+    }
+
+    @Test
+    void unassignProject_taskWithoutProject_isANoOp() {
+        Task task = taskWithId(1L, "A", null, LocalDate.of(2026, 12, 1), Priority.LOW, Status.TODO);
+        when(taskRepository.findById(1L)).thenReturn(Optional.of(task));
+
+        taskService.unassignProject(1L);
+
+        assertThat(task.getProject()).isNull();
+    }
+
+    @Test
+    void unassignProject_missingTask_throwsNotFound() {
+        when(taskRepository.findById(99L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> taskService.unassignProject(99L)).isInstanceOf(NotFoundException.class);
+    }
+
+    @Test
+    void update_leavesTheProjectUntouched() {
+        Project home = projectWithId(10L, "Home");
+        Task task = taskWithId(5L, "Old", null, LocalDate.of(2026, 1, 1), Priority.LOW, Status.TODO);
+        task.moveTo(home);
+        when(taskRepository.findById(5L)).thenReturn(Optional.of(task));
+
+        TaskResponse response = taskService.update(5L,
+                new UpdateTaskRequest("New", null, LocalDate.of(2026, 12, 24), Priority.HIGH, Status.DONE));
+
+        assertThat(task.getProject()).isSameAs(home);
+        assertThat(response.projectId()).isEqualTo(10L);
+        assertThat(response.projectName()).isEqualTo("Home");
     }
 }

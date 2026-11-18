@@ -1,12 +1,16 @@
 package dev.jasmeet.taskmanager.task;
 
+import dev.jasmeet.taskmanager.project.Project;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 
 import java.time.LocalDate;
@@ -41,6 +45,13 @@ public class Task {
     @Column(nullable = false)
     private Status status;
 
+    // ADR-002: many tasks to one optional project, owned by this side only.
+    // LAZY so loading a task does not load its project. No cascade: tasks never create,
+    // update or delete projects. Only moveTo and removeFromProject change this field.
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "project_id")
+    private Project project;
+
     protected Task() {
         // required by JPA
     }
@@ -52,6 +63,15 @@ public class Task {
     /** Full replacement of every client-editable field (PUT semantics). */
     public void update(String title, String description, LocalDate dueDate, Priority priority, Status status) {
         assign(title, description, dueDate, priority, status);
+    }
+
+    /** Puts the task in the given project. Moves it if it was in another one. */
+    public void moveTo(Project project) {
+        this.project = project;
+    }
+
+    public void removeFromProject() {
+        this.project = null;
     }
 
     // Private so the constructor never calls an overridable method
@@ -70,4 +90,5 @@ public class Task {
     public LocalDate getDueDate() { return dueDate; }
     public Priority getPriority() { return priority; }
     public Status getStatus() { return status; }
+    public Project getProject() { return project; }
 }
