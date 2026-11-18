@@ -67,6 +67,13 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
                 NOT_FOUND, List.of(), request);
     }
 
+    /** The service picks the code (e.g. DUPLICATE_PROJECT_NAME) and the field errors. */
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<Object> handleConflict(ConflictException ex, WebRequest request) {
+        return respond(ex, null, HttpStatus.CONFLICT, "Conflict", ex.getMessage(),
+                ex.getCode(), ex.getFieldErrors(), request);
+    }
+
     // ---------- 400: validation and unreadable input ----------
 
     /** Bean Validation failures on a request body. Every failing field is listed. */
