@@ -89,9 +89,10 @@ class TaskFilterIntegrationTest {
 
     private void task(String title, String dueDate, Priority priority, Status status, Long projectId) {
         LocalDate due = LocalDate.parse(dueDate);
-        Long id = taskService.create(new CreateTaskRequest(title, null, due, priority)).id();
+        TaskResponse created = taskService.create(new CreateTaskRequest(title, null, due, priority));
+        Long id = created.id();
         if (status != Status.TODO) {
-            taskService.update(id, new UpdateTaskRequest(title, null, due, priority, status));
+            taskService.update(id, new UpdateTaskRequest(title, null, due, priority, status, created.version()));
         }
         if (projectId != null) {
             taskService.assignProject(id, projectId);

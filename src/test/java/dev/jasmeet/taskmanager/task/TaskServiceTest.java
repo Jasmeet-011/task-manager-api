@@ -26,6 +26,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -60,6 +61,8 @@ class TaskServiceTest {
                                    LocalDate dueDate, Priority priority, Status status) {
         Task task = new Task(title, description, dueDate, priority, status);
         ReflectionTestUtils.setField(task, "id", id);
+        // What Hibernate has set on a task loaded from the database that was never updated.
+        ReflectionTestUtils.setField(task, "version", 0L);
         return task;
     }
 
@@ -69,6 +72,7 @@ class TaskServiceTest {
         when(taskRepository.save(any(Task.class))).thenAnswer(inv -> {
             Task t = inv.getArgument(0);
             ReflectionTestUtils.setField(t, "id", 7L);
+            ReflectionTestUtils.setField(t, "version", 0L); // Hibernate gives a new row version 0
             return t;
         });
 
@@ -79,7 +83,7 @@ class TaskServiceTest {
         verify(taskRepository).save(saved.capture());
         assertThat(saved.getValue().getStatus()).isEqualTo(Status.TODO);
         assertThat(response).isEqualTo(new TaskResponse(
-                7L, "Write report", "Q4 numbers", due, Priority.HIGH, Status.TODO, null, null));
+                7L, "Write report", "Q4 numbers", due, Priority.HIGH, Status.TODO, null, null, 0L));
     }
 
     @Test
@@ -90,7 +94,8 @@ class TaskServiceTest {
 
         TaskResponse response = taskService.get(1L);
 
-        assertThat(response).isEqualTo(new TaskResponse(1L, "A", null, due, Priority.LOW, Status.DONE, null, null));
+        assertThat(response).isEqualTo(new TaskResponse(
+                1L, "A", null, due, Priority.LOW, Status.DONE, null, null, 0L));
     }
 
     @Test
@@ -177,13 +182,31 @@ class TaskServiceTest {
         LocalDate newDue = LocalDate.of(2026, 12, 24);
 
         TaskResponse response = taskService.update(5L,
-                new UpdateTaskRequest("New", null, newDue, Priority.HIGH, Status.IN_PROGRESS));
+                new UpdateTaskRequest("New", null, newDue, Priority.HIGH, Status.IN_PROGRESS, 0L));
 
         assertThat(response).isEqualTo(new TaskResponse(
-                5L, "New", null, newDue, Priority.HIGH, Status.IN_PROGRESS, null, null));
-        // The managed entity is flushed at commit, so the service must not call save.
+                5L, "New", null, newDue, Priority.HIGH, Status.IN_PROGRESS, null, null, 0L));
+        // The entity is managed, so the service flushes it and must not call save.
         // Whether the change really persists is proven by the PUT integration test.
+        verify(taskRepository).flush();
         verify(taskRepository, never()).save(any());
+    }
+
+    @Test
+    void update_flushesBeforeBuildingTheResponse() {
+        Task existing = taskWithId(5L, "Old", null, LocalDate.of(2026, 1, 1), Priority.LOW, Status.TODO);
+        when(taskRepository.findById(5L)).thenReturn(Optional.of(existing));
+        // A mock cannot run Hibernate, so this stands in for it: the flush is what moves the version to 1.
+        doAnswer(inv -> {
+            ReflectionTestUtils.setField(existing, "version", 1L);
+            return null;
+        }).when(taskRepository).flush();
+
+        TaskResponse response = taskService.update(5L,
+                new UpdateTaskRequest("New", null, LocalDate.of(2026, 12, 24), Priority.HIGH, Status.DONE, 0L));
+
+        // 1 only if the response was built after the flush. Built before it, this would show 0.
+        assertThat(response.version()).isEqualTo(1L);
     }
 
     @Test
@@ -191,7 +214,7 @@ class TaskServiceTest {
         when(taskRepository.findById(99L)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> taskService.update(99L,
-                new UpdateTaskRequest("T", null, LocalDate.of(2026, 12, 1), Priority.LOW, Status.TODO)))
+                new UpdateTaskRequest("T", null, LocalDate.of(2026, 12, 1), Priority.LOW, Status.TODO, 0L)))
                 .isInstanceOf(NotFoundException.class);
     }
 
@@ -226,8 +249,24 @@ class TaskServiceTest {
 
         TaskResponse response = taskService.assignProject(1L, 10L);
 
-        assertThat(response).isEqualTo(new TaskResponse(1L, "A", null, due, Priority.LOW, Status.TODO, 10L, "Home"));
+        assertThat(response).isEqualTo(new TaskResponse(
+                1L, "A", null, due, Priority.LOW, Status.TODO, 10L, "Home", 0L));
         assertThat(task.getProject().getId()).isEqualTo(10L);
+    }
+
+    @Test
+    void assignProject_flushesBeforeBuildingTheResponse() {
+        Task task = taskWithId(1L, "A", null, LocalDate.of(2026, 12, 1), Priority.LOW, Status.TODO);
+        when(taskRepository.findById(1L)).thenReturn(Optional.of(task));
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(projectWithId(10L, "Home")));
+        doAnswer(inv -> {
+            ReflectionTestUtils.setField(task, "version", 1L);
+            return null;
+        }).when(taskRepository).flush();
+
+        TaskResponse response = taskService.assignProject(1L, 10L);
+
+        assertThat(response.version()).isEqualTo(1L);
     }
 
     @Test
@@ -317,7 +356,7 @@ class TaskServiceTest {
         when(taskRepository.findById(5L)).thenReturn(Optional.of(task));
 
         TaskResponse response = taskService.update(5L,
-                new UpdateTaskRequest("New", null, LocalDate.of(2026, 12, 24), Priority.HIGH, Status.DONE));
+                new UpdateTaskRequest("New", null, LocalDate.of(2026, 12, 24), Priority.HIGH, Status.DONE, 0L));
 
         assertThat(task.getProject()).isSameAs(home);
         assertThat(response.projectId()).isEqualTo(10L);

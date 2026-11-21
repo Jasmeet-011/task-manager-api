@@ -12,7 +12,8 @@ public record TaskResponse(
         Priority priority,
         Status status,
         Long projectId,
-        String projectName) {
+        String projectName,
+        Long version) {
 
     public static TaskResponse from(Task task) {
         // task.getProject() can be a lazy proxy. getId() needs no query, but getName() loads the project
@@ -27,6 +28,9 @@ public record TaskResponse(
                 task.getPriority(),
                 task.getStatus(),
                 project == null ? null : project.getId(),
-                project == null ? null : project.getName());
+                project == null ? null : project.getName(),
+                // The version only changes when Hibernate flushes the UPDATE, so callers that change the task
+                // must flush before calling from(), or this shows the old version (see TaskService).
+                task.getVersion());
     }
 }

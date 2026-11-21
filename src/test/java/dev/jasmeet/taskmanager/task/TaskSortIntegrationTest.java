@@ -103,7 +103,8 @@ class TaskSortIntegrationTest {
         create("medium", "2026-12-01", Priority.MEDIUM);
 
         taskService.update(low.id(),
-                new UpdateTaskRequest("was-low", null, LocalDate.parse("2026-12-01"), Priority.HIGH, Status.TODO));
+                new UpdateTaskRequest("was-low", null, LocalDate.parse("2026-12-01"), Priority.HIGH, Status.TODO,
+                        low.version()));
 
         list("sort", "priority,desc").andExpect(jsonPath("$.content[*].title").value(contains(
                 "was-low", "medium")));

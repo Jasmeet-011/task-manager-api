@@ -221,13 +221,14 @@ class TaskProjectIntegrationTest {
     void putOnTheTask_keepsItsProject() throws Exception {
         long taskId = createTask("Write report");
         long projectId = createProject("Work");
-        assign(taskId, projectId);
+        // The assignment changed the task row, so the version is now 1. A PUT must send that one.
+        long version = ((Number) JsonPath.read(assign(taskId, projectId), "$.version")).longValue();
 
         mockMvc.perform(put("/tasks/" + taskId)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"title": "Renamed", "dueDate": "2026-12-24",
-                                 "priority": "HIGH", "status": "IN_PROGRESS"}"""))
+                                 "priority": "HIGH", "status": "IN_PROGRESS", "version": %d}""".formatted(version)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.title").value("Renamed"))
                 .andExpect(jsonPath("$.projectId").value(projectId))
@@ -246,7 +247,7 @@ class TaskProjectIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"title": "T", "dueDate": "2026-12-24", "priority": "HIGH",
-                                 "status": "TODO", "projectId": %d}""".formatted(other)))
+                                 "status": "TODO", "version": 0, "projectId": %d}""".formatted(other)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.projectId").doesNotExist());
     }

@@ -12,6 +12,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 
 import java.time.LocalDate;
 
@@ -58,6 +59,12 @@ public class Task {
     @JoinColumn(name = "project_id")
     private Project project;
 
+    // Optimistic locking (ADR-007). Hibernate sets it to 0 on insert and adds 1 on every UPDATE of the row,
+    // and runs each UPDATE as "... WHERE id = ? AND version = <the version it loaded>". There is no setter:
+    // only Hibernate writes it.
+    @Version
+    private Long version;
+
     protected Task() {
         // required by JPA
     }
@@ -98,4 +105,5 @@ public class Task {
     public Priority getPriority() { return priority; }
     public Status getStatus() { return status; }
     public Project getProject() { return project; }
+    public Long getVersion() { return version; }
 }

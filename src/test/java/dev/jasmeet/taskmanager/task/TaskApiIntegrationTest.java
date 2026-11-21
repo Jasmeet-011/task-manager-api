@@ -49,12 +49,12 @@ class TaskApiIntegrationTest {
     }
 
     private static String updateJson(String title, String description, String dueDate,
-                                     String priority, String status) {
+                                     String priority, String status, long version) {
         // description omitted entirely when null, to prove "omitting it clears it"
         String descriptionField = description == null ? "" : "\"description\": \"" + description + "\",";
         return """
-                {"title": "%s", %s "dueDate": "%s", "priority": "%s", "status": "%s"}"""
-                .formatted(title, descriptionField, dueDate, priority, status);
+                {"title": "%s", %s "dueDate": "%s", "priority": "%s", "status": "%s", "version": %d}"""
+                .formatted(title, descriptionField, dueDate, priority, status, version);
     }
 
     /** Creates a task through the API and returns its Location header. */
@@ -207,15 +207,17 @@ class TaskApiIntegrationTest {
 
         mockMvc.perform(put(URI.create(location))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(updateJson("New", "new description", "2026-12-24", "HIGH", "IN_PROGRESS")))
+                        .content(updateJson("New", "new description", "2026-12-24", "HIGH", "IN_PROGRESS", 0)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.title").value("New"))
-                .andExpect(jsonPath("$.status").value("IN_PROGRESS"));
+                .andExpect(jsonPath("$.status").value("IN_PROGRESS"))
+                // The service flushes before building the response, so it already shows the new version.
+                .andExpect(jsonPath("$.version").value(1));
 
-        // The PUT response is built before commit, so it proves nothing about persistence.
-        // A separate GET proves the dirty-checked entity was really flushed to the database.
+        // A separate GET proves the dirty-checked entity was really written to the database.
         mockMvc.perform(get(URI.create(location)))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.version").value(1))
                 .andExpect(jsonPath("$.title").value("New"))
                 .andExpect(jsonPath("$.description").value("new description"))
                 .andExpect(jsonPath("$.dueDate").value("2026-12-24"))
@@ -229,7 +231,7 @@ class TaskApiIntegrationTest {
 
         mockMvc.perform(put(URI.create(location))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(updateJson("T", null, "2026-12-01", "LOW", "TODO")))
+                        .content(updateJson("T", null, "2026-12-01", "LOW", "TODO", 0)))
                 .andExpect(status().isOk());
 
         mockMvc.perform(get(URI.create(location)))
@@ -243,7 +245,7 @@ class TaskApiIntegrationTest {
 
         mockMvc.perform(put(URI.create(location))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(updateJson("T", null, "2020-01-01", "LOW", "TODO")))
+                        .content(updateJson("T", null, "2020-01-01", "LOW", "TODO", 0)))
                 .andExpect(status().isOk());
 
         mockMvc.perform(get(URI.create(location)))
@@ -254,7 +256,7 @@ class TaskApiIntegrationTest {
     void put_missing_returns404() throws Exception {
         mockMvc.perform(put("/tasks/999999")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(updateJson("T", null, "2026-12-01", "LOW", "TODO")))
+                        .content(updateJson("T", null, "2026-12-01", "LOW", "TODO", 0)))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("NOT_FOUND"));
     }

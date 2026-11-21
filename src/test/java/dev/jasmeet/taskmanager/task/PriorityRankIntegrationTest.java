@@ -74,7 +74,8 @@ class PriorityRankIntegrationTest {
         assertThat(rankOf(created.id())).isEqualTo(1);
 
         taskService.update(created.id(),
-                new UpdateTaskRequest("task", null, DUE, Priority.HIGH, Status.TODO));
+                new UpdateTaskRequest("task", null, DUE, Priority.HIGH, Status.TODO,
+                        created.version()));
 
         assertThat(rankOf(created.id())).isEqualTo(3);
     }
@@ -84,7 +85,8 @@ class PriorityRankIntegrationTest {
         TaskResponse created = create("task", Priority.MEDIUM);
 
         taskService.update(created.id(),
-                new UpdateTaskRequest("renamed", null, DUE, Priority.MEDIUM, Status.IN_PROGRESS));
+                new UpdateTaskRequest("renamed", null, DUE, Priority.MEDIUM, Status.IN_PROGRESS,
+                        created.version()));
 
         assertThat(rankOf(created.id())).isEqualTo(2);
     }

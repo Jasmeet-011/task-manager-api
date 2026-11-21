@@ -62,7 +62,10 @@ public class TaskService {
                 request.dueDate(),
                 request.priority(),
                 request.status());
-        // No explicit save: the entity is managed, so Hibernate flushes the changes at commit.
+        // No save (the entity is managed), but an explicit flush: @Version only increments when the UPDATE
+        // runs. Left to commit time, the response below would show the old version and the client's next
+        // PUT would get a false 409.
+        taskRepository.flush();
         return TaskResponse.from(task);
     }
 
@@ -82,6 +85,9 @@ public class TaskService {
         Project project = projectRepository.findById(projectId)
                 .orElseThrow(() -> new NotFoundException("Project", projectId));
         task.moveTo(project);
+        // Flush so the response carries the new version. If the project did not change, Hibernate runs no
+        // UPDATE and the version stays the same.
+        taskRepository.flush();
         return TaskResponse.from(task);
     }
 

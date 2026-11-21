@@ -105,9 +105,50 @@ class ErrorHandlingIntegrationTest {
 
     @Test
     void putWithoutStatus_namesStatus() throws Exception {
+        // version is sent, so status is the only failing field.
         expectProblem(putTask("""
-                {"title": "T", "dueDate": "2026-12-01", "priority": "LOW"}"""), 400, "VALIDATION_FAILED", "/tasks/1")
+                {"title": "T", "dueDate": "2026-12-01", "priority": "LOW", "version": 0}"""),
+                400, "VALIDATION_FAILED", "/tasks/1")
+                .andExpect(jsonPath("$.fieldErrors.length()").value(1))
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("status"));
+    }
+
+    @Test
+    void putWithoutVersion_namesVersion() throws Exception {
+        // Without the version the server cannot detect a conflict, so it is required, never skipped.
+        expectProblem(putTask("""
+                {"title": "T", "dueDate": "2026-12-01", "priority": "LOW", "status": "TODO"}"""),
+                400, "VALIDATION_FAILED", "/tasks/1")
+                .andExpect(jsonPath("$.fieldErrors.length()").value(1))
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("version"))
+                .andExpect(jsonPath("$.fieldErrors[0].message").value("must not be null"));
+    }
+
+    @Test
+    void putWithoutVersionAndStatus_listsBoth() throws Exception {
+        expectProblem(putTask("""
+                {"title": "T", "dueDate": "2026-12-01", "priority": "LOW"}"""),
+                400, "VALIDATION_FAILED", "/tasks/1")
+                .andExpect(jsonPath("$.fieldErrors.length()").value(2))
+                .andExpect(jsonPath("$.fieldErrors[*].field").value(containsInAnyOrder("status", "version")));
+    }
+
+    @Test
+    void putWithNegativeVersion_isRejectedAsMalformedNotAsAConflict() throws Exception {
+        expectProblem(putTask("""
+                {"title": "T", "dueDate": "2026-12-01", "priority": "LOW", "status": "TODO", "version": -1}"""),
+                400, "VALIDATION_FAILED", "/tasks/1")
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("version"))
+                .andExpect(jsonPath("$.fieldErrors[0].message").value("must be greater than or equal to 0"));
+    }
+
+    @Test
+    void putWithNonNumericVersion_namesVersion() throws Exception {
+        expectProblem(putTask("""
+                {"title": "T", "dueDate": "2026-12-01", "priority": "LOW", "status": "TODO", "version": "abc"}"""),
+                400, "VALIDATION_FAILED", "/tasks/1")
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("version"))
+                .andExpect(jsonPath("$.fieldErrors[0].message").value("must be a valid number"));
     }
 
     @Test
@@ -159,7 +200,7 @@ class ErrorHandlingIntegrationTest {
     @Test
     void unknownStatusOnPut_namesTheField() throws Exception {
         expectProblem(putTask("""
-                {"title": "T", "dueDate": "2026-12-01", "priority": "LOW", "status": "FINISHED"}"""),
+                {"title": "T", "dueDate": "2026-12-01", "priority": "LOW", "status": "FINISHED", "version": 0}"""),
                 400, "VALIDATION_FAILED", "/tasks/1")
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("status"))
                 .andExpect(jsonPath("$.fieldErrors[0].message").value("must be one of TODO, IN_PROGRESS, DONE"));
