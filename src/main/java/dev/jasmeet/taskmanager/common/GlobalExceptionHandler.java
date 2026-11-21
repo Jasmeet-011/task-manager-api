@@ -1,5 +1,9 @@
 package dev.jasmeet.taskmanager.common;
 
+import dev.jasmeet.taskmanager.ai.AiNotConfiguredException;
+import dev.jasmeet.taskmanager.ai.AiOutputInvalidException;
+import dev.jasmeet.taskmanager.ai.AiTimeoutException;
+import dev.jasmeet.taskmanager.ai.AiUpstreamException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.TypeMismatchException;
@@ -57,6 +61,10 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     private static final String METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED";
     private static final String UNSUPPORTED_MEDIA_TYPE = "UNSUPPORTED_MEDIA_TYPE";
     private static final String INTERNAL_ERROR = "INTERNAL_ERROR";
+    private static final String AI_NOT_CONFIGURED = "AI_NOT_CONFIGURED";
+    private static final String AI_TIMEOUT = "AI_TIMEOUT";
+    private static final String AI_UPSTREAM_ERROR = "AI_UPSTREAM_ERROR";
+    private static final String AI_OUTPUT_INVALID = "AI_OUTPUT_INVALID";
     // Fallback for 4xx statuses ADR-005 has no specific code for (e.g. 406). Amends ADR-005.
     private static final String CLIENT_ERROR = "CLIENT_ERROR";
 
@@ -79,6 +87,48 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(InvalidRequestException.class)
     public ResponseEntity<Object> handleInvalidRequest(InvalidRequestException ex, WebRequest request) {
         return validationFailed(ex, null, ex.getFieldErrors(), request);
+    }
+
+    // ---------- AI service failures (ADR-005, ADR-013) ----------
+    // Each one logs the exception's message server side and returns a fixed detail. The message can hold
+    // upstream details (status, error text, raw model output) and is never sent to the client.
+
+    @ExceptionHandler(AiNotConfiguredException.class)
+    public ResponseEntity<Object> handleAiNotConfigured(AiNotConfiguredException ex, WebRequest request) {
+        log.warn("AI suggestion refused: {}", ex.getMessage());
+        return respond(ex, null, HttpStatus.SERVICE_UNAVAILABLE, "AI service not configured",
+                "AI suggestions are not available: no API key is configured on the server. "
+                        + "Set ANTHROPIC_API_KEY and restart the app.",
+                AI_NOT_CONFIGURED, List.of(), request);
+    }
+
+    @ExceptionHandler(AiTimeoutException.class)
+    public ResponseEntity<Object> handleAiTimeout(AiTimeoutException ex, WebRequest request) {
+        log.warn("AI call timed out: {}", ex.getMessage());
+        return respond(ex, null, HttpStatus.GATEWAY_TIMEOUT, "AI service timeout",
+                "The AI service did not respond in time. Try again.",
+                AI_TIMEOUT, List.of(), request);
+    }
+
+    /** ERROR when the operator has to fix something (e.g. a rejected key), WARN when it is likely to pass. */
+    @ExceptionHandler(AiUpstreamException.class)
+    public ResponseEntity<Object> handleAiUpstream(AiUpstreamException ex, WebRequest request) {
+        if (ex.isOperatorMustAct()) {
+            log.error("AI service error that needs a configuration fix: {}", ex.getMessage());
+        } else {
+            log.warn("AI service error: {}", ex.getMessage());
+        }
+        return respond(ex, null, HttpStatus.BAD_GATEWAY, "AI service error",
+                "The AI service returned an error or could not be reached. Try again later.",
+                AI_UPSTREAM_ERROR, List.of(), request);
+    }
+
+    @ExceptionHandler(AiOutputInvalidException.class)
+    public ResponseEntity<Object> handleAiOutputInvalid(AiOutputInvalidException ex, WebRequest request) {
+        log.warn("AI output rejected: {}. Raw output: {}", ex.getMessage(), ex.getRawOutput());
+        return respond(ex, null, HttpStatus.BAD_GATEWAY, "Invalid AI output",
+                "The AI service returned a suggestion that could not be used. Try again.",
+                AI_OUTPUT_INVALID, List.of(), request);
     }
 
     // ---------- 400: validation and unreadable input ----------
