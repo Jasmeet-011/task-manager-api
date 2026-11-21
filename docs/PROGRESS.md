@@ -8,9 +8,9 @@
 | M1: Scaffold | Done | transcripts/01-scaffold.md |
 | M2: Task CRUD and error handling | Done | transcripts/02-task-crud.md |
 | M3: Project entity and association | Done | transcripts/03-projects.md |
-| M4: Filtering, sorting, pagination | Done | (export pending: `transcripts/04-filtering.md`) |
-| M5: AI suggest endpoint | Done | (export pending: `transcripts/05-ai-suggest.md`) |
-| M6: Optimistic locking | Not started | |
+| M4: Filtering, sorting, pagination | Done | transcripts/04-filtering.md |
+| M5: AI suggest endpoint | Done | transcripts/05-ai-suggest.md |
+| M6: Optimistic locking | Done | transcripts/06-optimistic-locking.md |
 | M7: UI | Not started | |
 | M8: Hardening and submission prep | Not started | |
 
@@ -28,6 +28,51 @@ Newest first. One entry per Claude Code session.
 - Manually verified:
 - Left for next session:
 ```
+
+### Session 06: M6 Optimistic locking (2026-11-21)
+- Built (four code commits, plus the docs commit: `7a161de` version and flush, `15a0e16` stale version is a 409, `de28a2b` assign, unassign and delete under a race, `34a3262` README):
+  - **Version everywhere:** `@Version Long version` on `Task` (no setter), `version` as the last field of `TaskResponse`, and a required `version` in `UpdateTaskRequest` (`@NotNull @Min(0)`).
+  - **The check:** `TaskService.update` compares the client's version with the loaded row (`Objects.equals`), then applies the change and calls `flushOrConflict`. That flushes and turns `ObjectOptimisticLockingFailureException` into the same `ConflictException("VERSION_CONFLICT", ..., [])`. The response is built after the flush.
+  - **Assign and unassign:** also `flushOrConflict`, so a lost race is a 409, not a 500. A real change raises the version. A repeat assign, or unassigning a task with no project, does not.
+  - **Delete:** a bulk delete by id (`TaskRepository.deleteWithoutVersionCheck`), so it never checks the version. 0 rows deleted is a 404. The repository comment says it bypasses the persistence context and why that is safe.
+  - **README:** the stretch section (built, left out, next).
+  - **No new error code and no handler change:** `GlobalExceptionHandler` already maps `ConflictException`.
+- Decisions settled: ADR-014 (both M6 pending items). Amended: ADR-005 (the `VERSION_CONFLICT` row), ADR-007 (pointer), ADR-010 (`version` joins the required PUT fields) and ADR-011 (assign bumps the version and can be a 409). Two of your seven plan decisions needed a correction when I read the code:
+  - **Assign is not last-write-wins.** Hibernate guards every UPDATE of a versioned row with the loaded version, assign included. You chose to map a lost race to 409.
+  - **Delete does check the version at the SQL level.** Deleting the loaded entity runs `DELETE ... AND version = ?`. You chose a bulk delete by id.
+  - Your other defaults: `@Min(0)` on `version`, `fieldErrors: []` on `VERSION_CONFLICT`, and a PUT that changes nothing keeps its version.
+- Tests: `env -u ANTHROPIC_API_KEY ./mvnw clean test` passed, 336 tests, 0 failures (261 before, 75 new).
+  - 1 context, 4 `AiOutputInvalidExceptionTest`, 32 `AnthropicAiClientTest`, 6 `AnthropicPropertiesTest`, 5 `SuggestEndToEndTest`, 1 `SuggestWithoutKeyTest`, 14 `TaskSuggestionApiIntegrationTest`, 33 `TaskSuggestionServiceTest` (all unchanged from M5).
+  - 46 `ErrorHandlingIntegrationTest` (42 before, 4 new: missing, missing with status, negative and non-numeric `version`), 16 `ProjectApiIntegrationTest`, 9 `ProjectServiceTest`, 4 `PriorityRankIntegrationTest`, 14 `TaskApiIntegrationTest`, 16 `TaskFilterIntegrationTest`, 2 `TaskListQueryCountTest`, 17 `TaskProjectIntegrationTest`, 10 `TaskSortIntegrationTest`, 14 `TaskSortTest`.
+  - 29 `TaskServiceTest` (21 before, 8 new net) and 63 `TaskVersioningIntegrationTest` (all new; 50 of them are the ten repetitions of five race tests: two PUTs, two deletes, delete against a PUT, two assigns, assign against a PUT).
+  - **Existing tests changed:** `TaskServiceTest` (helper, four response expectations, three update tests, both delete tests), `TaskApiIntegrationTest` (the `updateJson` helper and its four PUT tests, and a comment that the flush made false), `TaskProjectIntegrationTest` (two PUT tests; `putOnTheTask_keepsItsProject` now sends version 1, the value the assign left), `ErrorHandlingIntegrationTest` (two PUT tests), and the direct `taskService.update` calls in `TaskFilterIntegrationTest`, `TaskSortIntegrationTest` and `PriorityRankIntegrationTest`.
+  - **The required tests:**
+    - Sequential: `put_withTheRightVersion_succeeds_thenTheSameVersionAgainIsA409`.
+    - Concurrent: `put_twoConcurrentRequestsWithTheSameVersion_oneWinsOneConflicts`.
+    - Assign bumps: `assign_bumpsTheVersion_soAPutWithTheOldVersionIsA409`.
+    - Repeat assign does not: `assign_toTheSameProjectAgain_doesNotBumpTheVersion`.
+    - PUT and assign return the new version: `put_returnsTheIncrementedVersion_andTheClientCanKeepGoingWithIt` and `assign_returnsTheNewVersion`.
+    - Missing version: `putWithoutVersion_namesVersion`.
+  - **Added beyond your list:** the real-H2 probe `aWriteBetweenLoadAndFlush_makesFlushThrowTheExceptionTheServiceCatches`, the unit tests for each lost-race mapping, versions above 127, a stale PUT that would change nothing, and the delete and assign races.
+  - **Mutation checks, each after its commit and each restored with `git checkout`:**
+    - C1: no flush in `update` (4 tests failed), no flush in `assignProject` (4), `@Version` removed (9).
+    - C2: comparison removed (7), catch removed (11), `!=` instead of `equals` (1), response built before the flush (5).
+    - C3: assign without the catch (19), unassign without the flush (1), delete back to the entity delete (11).
+  - **What the mutation checks showed:** with the catch removed, the two-PUT race test failed 10 of 10 runs, so it reliably reaches the flush path. With the comparison removed it failed only 1 of 10, so the sequential tests carry that check. Without the assign catch, a lost race logged `ObjectOptimisticLockingFailureException ... update tasks ... where id=? and version=?` as an unhandled 500. With the entity delete, 9 of 10 double deletes did the same. `delete_racingAnUpdate_deleteAlwaysWins` did not fail under that mutation (the interleaving is too rare), so it is a regression check, not proof.
+  - The race tests ran five times in a row (once in the full suite, four on their own), all green, with no 500 logged.
+- Manually verified: `./mvnw spring-boot:run` on port 18080 with `ANTHROPIC_API_KEY` removed, one curl per request.
+  - POST returned 201 with `version` 0. PUT with version 0 returned 200 and version 1. The same PUT again returned 409 `application/problem+json`, code `VERSION_CONFLICT`, `fieldErrors: []`.
+  - A PUT with no version and one with version -1 each returned 400 naming `version`.
+  - Assign moved the task from version 1 to 2. Assigning again left it at 2. A PUT with version 1 then returned 409, and one with version 2 returned 200 and version 3. The list showed `version`.
+  - DELETE returned 204, and a second DELETE returned 404.
+  - No "Unhandled exception" in the app log. This was the only manual check this session.
+- Known gaps and limits:
+  - The race tests are timing-based and run on H2 only. Another database may report a lost race with a different exception.
+  - Projects have no version.
+  - A PUT that changes nothing keeps its version (ADR-014).
+  - Assign and unassign can return 409 although they take no version, only when they collide with another write within milliseconds.
+  - The only "Unhandled exception" in the full test log is the M2 test that throws from `/test-only/boom` on purpose.
+- Left for next session: M7 (UI). It must send the version with every update and show a readable message on a 409. The M6 transcript link is already in the status table. You export `transcripts/06-optimistic-locking.md` and commit it yourself. Nothing is pushed.
 
 ### Session 05: M5 AI suggest endpoint (2026-11-21)
 - Built (three commits: `e1daa8b` config and errors, `58a482e` client, `d5f2e9f` endpoint, plus the docs commit):
@@ -169,3 +214,8 @@ Every time the model produced something wrong or poorly structured and I caught 
 | 05 | The plan said, as fact, that forcing a tool returns 400 on Opus 5.5 and Sonnet 5.5, and built the main design change on it. Its only source was the API reference bundled with Claude Code, and the plan didn't say so. | A claim about an external API that drives a design decision needs its source next to it. It turned out true, but a bundled copy can be out of date. | Before approving, you asked for a doc link or the exact error. | Checked Anthropic's live migration guides for Opus 5.5, Sonnet 5.5 and Haiku 5.5, quoted the error text and the sections, and put the links in ADR-013. |
 | 05 | Planned `POST /tasks/suggest` inside `TaskController` without checking package dependencies. | `ai/` already imports `Priority` and `Task` from `task/`, so the controller importing `ai/` made a `task` ↔ `ai` cycle. | I noticed it while writing the import in C3 and raised it. You did not catch this one. | You chose to move it: `ai/TaskSuggestionController` at the same URL. CLAUDE.md records the one-way rule, and a grep confirms `task/` imports nothing from `ai/`. |
 | 05 | For the manual check I waited for startup with `curl --retry-connrefused --retry 60 --retry-delay 1` on the suggest request itself. | curl's `--retry` also retries 503 as a transient error. Once the app was up, it sent `POST /tasks/suggest` 57 times, once a second. No harm: there was no key, every call was refused before any HTTP request, and nothing left the machine. But it was careless, and against a real key it would have been 57 billed calls. | The repeated response bodies in the output. I reported it. You did not catch it. | Wait for the port (or poll a GET that returns 200), then send each request exactly once. |
+| 06 | Wrote fully qualified `org.assertj...Assertions.assertThat(...)` calls in the new `TaskVersioningIntegrationTest`. | CLAUDE.md says to import types, and I had made this mistake in M2 and M4. | My own re-read of the file right after writing it, before the first run. | Static import of `assertThat`, plus a `versionIn` helper that returns a `long`. |
+| 06 | Named a test helper `put(long, String, long)` in a class that also static-imports `MockMvcRequestBuilders.put(String)`. | A method declared in the class hides a statically imported one of the same name, so every `put("/tasks/...")` call stopped compiling. | The compiler, on the first run. | Renamed it `putTask`. |
+| 06 | After that failed compile I ran my result summary on `target/surefire-reports` and printed "total 274, failures 3, errors 6". | Those reports were left over from the previous successful run, so the numbers described the old code. A summary of stale files looks like a result. | The compile errors were listed in the same output, so I treated the numbers as stale and deleted the reports. | Before each run I now remove `target/surefire-reports`, and I check Maven's exit code before reading any totals. |
+| 06 | My first mutation summary used a regex that dropped failure lines containing `->`, and it showed only 3 failing tests for "comparison removed". | It hid the sequential tests, which are the ones that pin that check. Reporting it would have under-sold the result and left a wrong picture of which test catches what. | The sequential test was missing from the list, and I expected it to fail. | Re-read the failure lines straight from the log. The real list had 7 failures. The corrected extraction was used for every later check. |
+| 06 | The plan said the HTTP race test "cannot choose" whether the comparison or the flush stops the loser, so a separate deterministic test was needed. | It was a guess, and not quite right. The mutation checks measured it: the race test reached the flush path 10 of 10 times, but caught a missing comparison only 1 of 10 times. The real-H2 probe I added for the flush path does not fail when the catch is removed, because it tests Hibernate directly. | I measured it with the mutation checks. You did not catch this one. | Kept the probe, but described each test for what it pins: the unit test pins the mapping, the probe pins the exception type, and the sequential tests pin the comparison. |

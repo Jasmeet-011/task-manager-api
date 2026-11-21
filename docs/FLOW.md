@@ -29,7 +29,7 @@ JSON body → CreateTaskRequest (@Valid)
 → TaskService.create
   status is always TODO
   save Task
-→ 201 Created, Location: /tasks/{id} (path only, no query string), body TaskResponse
+→ 201 Created, Location: /tasks/{id} (path only, no query string), body TaskResponse (version 0)
 ```
 
 ## List tasks: `GET /tasks?status=&priority=&dueAfter=&dueBefore=&projectId=&page=&size=&sort=`
@@ -64,17 +64,36 @@ query params
 
 An unknown `projectId` is a filter that matches nothing: 200 with an empty page, never 404. Measured with the SQL log in M4: a page of tasks in 3 different projects ran one task-plus-project SELECT and one count, and no per-project SELECTs (the N+1 seen in M3 is gone). The rank column `priority_rank` is internal and never appears in the response.
 
-## Update a task: `PUT /tasks/{id}` (with optimistic locking from M6)
+## Update a task: `PUT /tasks/{id}` (optimistic locking, M6, ADR-014)
+
+As built in M6.
 
 ```
-JSON body → UpdateTaskRequest (@Valid, version required)
+JSON body → UpdateTaskRequest (@Valid): title, dueDate, priority, status, version (all required) and description
+  version missing or not a number → 400 VALIDATION_FAILED naming version
+  version below 0                 → 400 VALIDATION_FAILED naming version
 → TaskService.update
   load task                         missing → 404 NOT_FOUND
-  compare request.version to task   mismatch → 409 VERSION_CONFLICT
+  Objects.equals(task.version, request.version)
+                                    different → 409 VERSION_CONFLICT, nothing changed (checked first, so a stale
+                                    version is a 409 even if the PUT would change nothing)
   apply all fields (full replacement)
-  flush; Hibernate checks @Version   concurrent write in between → 409 VERSION_CONFLICT
-→ 200 TaskResponse (version incremented)
+  flushOrConflict → Hibernate runs
+      UPDATE tasks SET ..., version = v+1 WHERE id = ? AND version = v     (v = the version loaded above)
+    1 row                           → the entity's version is now v+1
+    0 rows (someone committed after our load)
+                                    → ObjectOptimisticLockingFailureException caught in flushOrConflict
+                                    → 409 VERSION_CONFLICT, the same body as the comparison above
+    nothing changed                 → no UPDATE, version stays v
+  TaskResponse.from(task)           built AFTER the flush, so it carries the new version
+→ 200 TaskResponse
 ```
+
+The 409 is the ADR-005 shape with `code` `VERSION_CONFLICT`, `fieldErrors: []`, and no current version. The client fetches the task again (`GET /tasks/{id}`) and retries with the version it gets.
+
+Why flush before the response: the version only changes when the UPDATE runs. Left to commit time, the response would show the old version, and the client's next PUT would get a false 409.
+
+Two requests with the same version at the same time: both load version 0, so both pass the comparison. Both flush `UPDATE ... WHERE version = 0`. The first matches the row. The second matches no row (Hibernate reports "expected row count 1 but was 0"), so it gets the 409. A request that loads after the first has committed fails the comparison instead. Either way: one 200 and one 409.
 
 ## Create a project: `POST /projects` (M3)
 
@@ -102,24 +121,40 @@ GET /projects/{id}   → ProjectService.get  → 200 ProjectResponse
                          missing → 404 NOT_FOUND, non-numeric → 400 VALIDATION_FAILED
 ```
 
-## Assign and unassign a task (M3)
+## Assign and unassign a task (M3, changed in M6)
 
 ```
-PUT /tasks/{id}/project/{projectId}
+PUT /tasks/{id}/project/{projectId}        (no version in the request, ADR-014)
 → TaskService.assignProject
   load task                          missing → 404 NOT_FOUND "Task N not found"
   load project                       missing → 404 NOT_FOUND "Project N not found" (task left unchanged)
   task.moveTo(project)               moves it if it was elsewhere; same project again = no change, no UPDATE
-→ 200 TaskResponse with projectId and projectName
+  flushOrConflict                    a real change runs UPDATE ... WHERE id = ? AND version = v, so the version is v+1
+                                     no change: no UPDATE, version stays
+                                     0 rows (a PUT, assign or unassign committed after our load)
+                                       → 409 VERSION_CONFLICT; the client retries
+→ 200 TaskResponse with projectId, projectName and the new version
 
 DELETE /tasks/{id}/project
 → TaskService.unassignProject
   load task                          missing → 404 NOT_FOUND
-  task.removeFromProject()           already none = fine
+  task.removeFromProject()           already none = fine (no UPDATE, no bump)
+  flushOrConflict                    flushed here, not at commit, so a lost race can be mapped (409 VERSION_CONFLICT)
 → 204 No Content
 ```
 
-`PUT /tasks/{id}` never touches the project. Only `moveTo` and `removeFromProject` change it.
+`PUT /tasks/{id}` never touches the project. Only `moveTo` and `removeFromProject` change it. Because they change the task row, a client still holding the old version gets a 409 on its next `PUT /tasks/{id}`.
+
+## Delete a task: `DELETE /tasks/{id}` (M6, ADR-014)
+
+```
+→ TaskService.delete
+  taskRepository.deleteWithoutVersionCheck(id)    one DELETE ... WHERE id = ?, no version, no entity loaded
+    0 rows deleted                  → 404 NOT_FOUND (also what a second concurrent delete gets)
+→ 204 No Content
+```
+
+Deleting the loaded entity would add `AND version = ?`, and a concurrent edit or second delete between the load and the delete would be a 500. The bulk delete bypasses the persistence context, which is safe because `Task` has no cascades or lifecycle callbacks.
 
 ## AI suggestion: `POST /tasks/suggest` (M5)
 

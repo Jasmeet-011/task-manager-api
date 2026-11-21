@@ -58,7 +58,7 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 | `VALIDATION_FAILED` | 400 | Bean Validation failures, unknown enum values, malformed dates, bad query params |
 | `MALFORMED_REQUEST` | 400 | Body is not valid JSON |
 | `NOT_FOUND` | 404 | Missing task or project, unknown route |
-| `VERSION_CONFLICT` | 409 | Stale version on update (ADR-007) |
+| `VERSION_CONFLICT` | 409 | Stale version on update (ADR-007), or a write that lands between load and flush on update, assign or unassign (ADR-014) |
 | `AI_UPSTREAM_ERROR` | 502 | Model API returned an error or was unreachable |
 | `AI_OUTPUT_INVALID` | 502 | Model output could not be parsed or failed validation |
 | `AI_NOT_CONFIGURED` | 503 | No API key set |
@@ -72,6 +72,7 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 - **Amended in M2:** the three rows before `DUPLICATE_PROJECT_NAME` were added so that every status Spring MVC can produce has a stable code. `type` is always `"about:blank"` and is set explicitly, because Spring leaves it out of the JSON otherwise.
 - **Amended in M3:** `DUPLICATE_PROJECT_NAME` was added (ADR-011). It is specific, like `VERSION_CONFLICT`, so a client can switch on it. The 409 lists `name` in `fieldErrors` because a specific field failed.
 - **Amended in M5:** no new codes (ADR-013). `AI_NOT_CONFIGURED` means only "no key set". A key that is set but rejected (401 or 403) is `AI_UPSTREAM_ERROR`, logged at ERROR so the operator knows to fix it. A connect timeout is `AI_TIMEOUT`, like a read timeout.
+- **Amended in M6:** no new codes (ADR-014). `VERSION_CONFLICT` has `fieldErrors: []` and does not carry the current version. It is also returned by assign and unassign when they lose a race.
 - **Known limit:** errors Tomcat rejects before Spring MVC runs (malformed URLs such as `/tasks/%`) return Tomcat's HTML 400 page, not this body. It leaks no stack trace or message. Optional M8 item.
 
 - **Why:** A real standard that's built into Spring, with one shape for every error and field-level detail where it matters.
@@ -90,6 +91,7 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 - **Choice:** `@Version Long version` on `Task`, returned in every task response. Update requests must include `version`. A mismatch returns 409 `VERSION_CONFLICT`.
 - **Why:** Lost updates are a real problem when the same task is edited from two tabs or devices. JPA supports it natively, and the surface area is small.
 - **Tradeoff:** Clients must send the version and handle a 409 by re-fetching. There's no automatic merge.
+- **Details (M6):** where the version travels, the flush, and the rules for assign, unassign and delete are in ADR-014.
 
 ### ADR-008: Code style
 
@@ -109,7 +111,7 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 - **`dueDate` is required. Past dates are allowed on create and on update.** A create-only check could be bypassed with a PUT anyway, and overdue tasks must stay editable.
 - **`priority` is required, with no default.** Priority is a judgment only the user can make, so the server does not guess.
 - **`status` is not part of the create request.** Every new task starts as TODO. A `status` sent on create is ignored. On update, `status` is required.
-- **PUT is a full replacement.** The client sends `title`, `dueDate`, `priority` and `status` every time. `description` is optional, and omitting it clears it. `CreateTaskRequest` and `UpdateTaskRequest` are separate records.
+- **PUT is a full replacement.** The client sends `title`, `dueDate`, `priority` and `status` every time. `description` is optional, and omitting it clears it. `CreateTaskRequest` and `UpdateTaskRequest` are separate records. *(Amended in M6: `version` is also required, see ADR-014.)*
 - **PUT never touches the project.** Project assignment comes in M3 through its own endpoints.
 - **Limits: title up to 200 characters, description up to 2000.** The `@Size` annotations and the `@Column(length)` on `Task` use the same constants (`Task.TITLE_MAX`, `Task.DESCRIPTION_MAX`), so a value cannot pass validation and then fail in the database. Violations say "must be at most N characters".
 - **Unknown JSON properties are ignored** (Boot's default). Tolerant reader: clients don't break if we add fields.
@@ -129,7 +131,7 @@ Builds on ADR-002 (unidirectional, lazy, no cascade).
   - The service throws a generic `ConflictException(code, message, fieldErrors)`, which the handler maps to 409. M6's `VERSION_CONFLICT` reuses it.
 - **Names are case-sensitive.** "Home" and "home" can coexist. Case-insensitive uniqueness needs either an H2-only column type (`VARCHAR_IGNORECASE`, not portable) or an extra lowercase key column. Documented limit, and a test records it.
 - **Assignment has its own endpoints, and `PUT /tasks/{id}` never touches the project.** `Task` has `moveTo(Project)` and `removeFromProject()` and nothing else changes the project. A `projectId` in a PUT body is ignored like any other unknown property (ADR-010).
-  - `PUT /tasks/{id}/project/{projectId}` sets the project, moves the task if it was in another one, and returns 200 with `TaskResponse`. Repeating the call changes nothing (Hibernate sees no difference, so it runs no UPDATE).
+  - `PUT /tasks/{id}/project/{projectId}` sets the project, moves the task if it was in another one, and returns 200 with `TaskResponse`. Repeating the call changes nothing (Hibernate sees no difference, so it runs no UPDATE). *(Amended in M6: a real change raises the task's version, and a lost race is a 409 `VERSION_CONFLICT`, see ADR-014.)*
   - `DELETE /tasks/{id}/project` returns 204, also when the task had no project. The caller's goal is already met, so there is nothing to fail on.
   - A missing task or project is 404 `NOT_FOUND`. The task is looked up first, and the detail names whichever is missing.
 - **`GET /projects` is a plain list ordered by id, with no pagination.** We expect few projects. `GET /projects/{id}` exists so the `Location` header on the 201 points at something.
@@ -280,13 +282,59 @@ Builds on ADR-003 (unsaved draft), ADR-004 (`RestClient` behind `AiClient`) and 
 
 - **Tradeoff:** without forcing, a response with no tool call is possible and becomes a 502. The tests mock the model, so prompt quality is only checked by a real call. Haiku may handle tricky date phrasing less well than a larger model. That fix is a config change.
 
+### ADR-014: Optimistic locking on tasks (M6)
+
+Builds on ADR-007 (the stretch feature), ADR-005 (`VERSION_CONFLICT`, no new code) and ADR-010 (PUT semantics).
+
+**The version travels in the request body**
+- `Task` has `@Version Long version`. Hibernate sets it to 0 on insert and adds 1 on every UPDATE, and runs each UPDATE as `... WHERE id = ? AND version = <loaded>` (seen in the SQL log in M6). There is no setter.
+- Every `TaskResponse` carries `version`, including the responses from create, PUT and assign.
+- `UpdateTaskRequest.version` is required: `@NotNull @Min(0)`. Missing is a 400 `VALIDATION_FAILED` naming `version`. Silently skipping the check would defeat the feature. A negative version is also a 400, not a 409: no task ever had one, and "someone else changed it" would be a misleading answer.
+- **Options considered:** an `If-Match` header with ETags. By HTTP convention a failed `If-Match` is 412, and the assignment asks for 409. A body field is also visible in the JSON and simple for the UI.
+
+**Two checks, two different windows**
+- `TaskService.update` compares the client's version with the row it just loaded, using `Objects.equals`, never `==` (two `Long` objects above 127 are equal in value but not the same object). `@Version` cannot do this: it only guards the time between the load and the flush, and never sees the client's number.
+- `@Version` covers the rest: a request that loaded the task, then lost a race with another commit before its flush.
+- Both end in the same `ConflictException("VERSION_CONFLICT", ...)` (the generic exception from M3), so the client sees one 409 whichever check stopped it.
+
+**Flush before building the response**
+- The version only changes when Hibernate runs the UPDATE. Left to commit time, the PUT or assign response would show the old version, and the client's next PUT would get a false 409. So `update` and `assignProject` flush first and build the response after. It is `flush()` and not `saveAndFlush`: the entity is already managed, so `save` would be a pointless merge.
+- `flushOrConflict` wraps the flush and turns `ObjectOptimisticLockingFailureException` into the 409. It is caught on the flush, not at commit, so it happens inside the service where it can be mapped. A test pins that on real H2 a flush after someone else's commit throws that exact exception type.
+
+**Assign, unassign and delete take no version**
+- Assign and unassign change the task row (`project_id`), so a real change raises the version. Assigning the same project again, or unassigning a task that has none, changes nothing: no UPDATE, no bump. A client holding an older version gets a 409 on its next PUT, which is correct, because the task did change.
+- **They are not last-write-wins.** Hibernate still guards their UPDATE with the version it loaded. If a PUT, an assign or an unassign commits between this request's load and flush, the loser's UPDATE matches no row. Left unhandled that is a 500 (reproduced in M6 by removing the catch: two concurrent assigns failed 10 times out of 10). So assign and unassign also use `flushOrConflict`, and return 409 `VERSION_CONFLICT`. The client sends no version and just retries. Unassign flushes too, even though it returns no body: left to commit time, the failure would escape the catch.
+- **Delete never checks the version**: deleting means "I want this task gone", whatever its state. It is a bulk delete by id (`TaskRepository.deleteWithoutVersionCheck`). Deleting the loaded entity makes Hibernate add `AND version = ?`, so a concurrent edit or a second delete between load and delete would be a 500 (reproduced in M6: 9 of 10 concurrent deletes). A bulk delete returns the row count, and 0 is 404.
+- The bulk delete bypasses the persistence context. That is safe because `Task` has no cascades and no lifecycle callbacks, and `delete` loads no `Task`, so no stale copy is left behind. The comment on the repository method says so.
+
+**A PUT that changes nothing keeps its version**
+- If every field already has the sent value, Hibernate sees nothing dirty and runs no UPDATE, so the version does not move. Nothing was lost, and it matches the rule for a repeated assign. The comparison still runs first, so a stale version is a 409 even for a PUT that would change nothing. Tests that expect a bump must change a field, and tests of two racing PUTs must send different content, or both return 200.
+
+**The 409 body**
+- The standard ADR-005 shape. `fieldErrors` is `[]`: the client's version was a stale snapshot, not an invalid value, and in the race case it was current when sent. (`DUPLICATE_PROJECT_NAME` lists `name` because that field is at fault.) The body does not carry the current version: the client re-fetches, which gives it the current version and data, and every error keeps one shape.
+- `detail` names the task and says to fetch it again and retry.
+
+**Settled from the M6 pending list:** the version goes in the body, not in `If-Match`. Assign and unassign need no version, and a real change raises it.
+
+**Out of scope:** `ETag` and `If-Match`, version checks on assign and delete, the current version in the 409, and merging conflicting edits.
+
+**Next steps**
+- Return the current task in the 409, so the client skips a round trip.
+- Accept `If-Match` alongside the body field.
+- Merge edits that touch different fields.
+- A `version` on `PUT /projects/{id}` once project updates exist (ADR-011).
+- The UI (M7) sends the version with every update and shows "changed elsewhere, reload" on a 409.
+
+**Known limits**
+- The race tests are timing-based. In M6 the two-PUT test reached the flush check in 10 of 10 runs, but caught a missing comparison in only 1 of 10 (`@Version` alone stops most races), so the sequential tests are what pin the comparison.
+- The race tests run against H2 only. Another database may report a lost race with a different exception, so the catch would need rechecking if the database changed (as with the constraint name in ADR-011).
+- Projects have no version, because they cannot be updated yet.
+
+- **Tradeoff:** clients must send the version and handle a 409 by re-fetching, and there is no merge. Assign and unassign can return 409 although they take no version, but only when they collide with another write within milliseconds. A PUT that changes nothing does not raise the version.
+
 ---
 
 ## Pending (settle in the milestone session, then move up)
-
-**M6**
-- Version in the request body (lean) or an `If-Match` header with ETags.
-- Whether assigning or unassigning a project also checks the version. (Once `@Version` exists, an assignment that changes the project bumps it. A repeated identical assign does not, because Hibernate sees no change.)
 
 **M7**
 - Seed demo data on startup, while keeping tests isolated from it?
