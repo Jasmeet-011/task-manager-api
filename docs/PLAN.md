@@ -1,6 +1,6 @@
 # Plan
 
-Interview: Fri Nov 20. Submission deadline: at least 24 hours before the interview slot. Each milestone runs in a fresh Claude Code session, exported to `transcripts/` at the end.
+Interview: Tue Nov 24. Submission deadline: at least 24 hours before the interview slot. Each milestone runs in a fresh Claude Code session, exported to `transcripts/` at the end.
 
 ## Milestones and estimated time
 
@@ -105,36 +105,44 @@ If time gets tight, M7 can be trimmed to the bare requirements. M8 is never skip
 
 ## M5: AI suggest endpoint
 
+Decisions are in ADR-013.
+
 **Build**
-- Config: `ai.anthropic.api-key=${ANTHROPIC_API_KEY:}`, model, base URL, connect and read timeouts.
-- `AiClient` interface plus `AnthropicAiClient` (`RestClient`, timeouts set explicitly).
-- `TaskSuggestionService`: builds the prompt with today's date from `Clock`, calls the client, parses and validates the output, and returns a draft.
-- `POST /tasks/suggest`, with request `{ "text": "..." }` (required, max length enforced).
-- Response has the same shape as `CreateTaskRequest`:
+- Config: `ai.anthropic.api-key=${ANTHROPIC_API_KEY:}`, `model` (default `claude-haiku-5-5`), `base-url`, `connect-timeout` (5s), `read-timeout` (20s).
+- `AiClient` interface plus `AnthropicAiClient` (`RestClient` over the JDK HTTP client, timeouts set explicitly). One tool, `create_task_draft`, with a strict schema. It is not forced (`tool_choice: auto`), because forcing a tool returns 400 on several current models.
+- `TaskSuggestionService`: builds the prompt with today's date and weekday from `Clock`, calls the client, validates the tool input, and returns a draft.
+- `TaskSuggestionController` in `ai/`: `POST /tasks/suggest`, with request `{ "text": "..." }` (required, at most 500 characters).
+- The response has the same fields as `CreateTaskRequest`. `dueDate` and `priority` are null when the note gives none, and there is no `status`:
 
 ```json
 {
   "title": "Submit quarterly report",
   "description": "Finish and submit the Q4 quarterly report.",
-  "dueDate": "2026-11-20",
-  "priority": "HIGH",
-  "status": "TODO"
+  "dueDate": "2026-11-27",
+  "priority": "HIGH"
 }
 ```
 
-- Server-side validation of model output: valid JSON, non-blank title within limits, priority is a real enum value, dueDate is a valid ISO date or null. Anything else returns 502 `AI_OUTPUT_INVALID`, and the raw output is logged (truncated) server-side.
-- Failure mapping per ADR-005: no key returns 503, timeout 504, upstream error 502.
-- The API key is never logged.
+- Server-side validation of the model's output:
+  - the response is JSON with exactly one call to the tool
+  - the tool input is an object with only the four fields
+  - the title is a non-blank string of at most 200 characters, and the description is at most 2000
+  - the priority is exactly `LOW`, `MEDIUM` or `HIGH`, or null
+  - the due date is a real `yyyy-MM-dd` date, or null
 
-**Tests (all with the model mocked)**
-- Service unit test, happy path.
-- Malformed model output (not JSON) returns `AI_OUTPUT_INVALID`.
-- Model output with an invalid enum or date returns `AI_OUTPUT_INVALID`.
-- Timeout returns 504, missing key returns 503.
-- Controller integration test with the `AiClient` mocked.
-- Blank `text` returns a 400 with the error body.
+  Anything else returns 502 `AI_OUTPUT_INVALID`, and the raw output is logged (truncated) server-side.
+- Failure mapping per ADR-005: no key returns 503, a connect or read timeout 504, and an error status (401 and 403 included) or an unreachable host 502.
+- The API key is never logged and never appears in a response.
 
-**Manual:** one real call with a key set, to confirm the happy path end to end.
+**Tests (no key, no network; the model is never called)**
+- `AnthropicAiClient` against `MockRestServiceServer`: the exact request, every error status, timeouts, an unreachable host, and every unusable 2xx response.
+- Service unit tests with the model mocked and the clock fixed: happy path, today's date in the prompt, nulls, and every invalid-content case (enum, date, title, extra field).
+- Malformed model output (not JSON) returns `AI_OUTPUT_INVALID`, end to end against a loopback stub (`SuggestEndToEndTest`).
+- The real read timeout returns 504 against a slow stub. A missing key returns 503 with no request sent.
+- Controller integration test with the `AiClient` mocked, including every failure's ADR-005 body.
+- Blank or too-long `text` returns a 400 with the error body.
+
+**Manual:** one real call with a key set, to confirm the happy path end to end. I make it myself, in my own terminal.
 
 ## M6: Optimistic locking
 
@@ -156,7 +164,7 @@ If time gets tight, M7 can be trimmed to the bare requirements. M8 is never skip
 **Build** a single `src/main/resources/static/index.html` served at `/`:
 - Task list with at least one working filter (status, plus priority and project if cheap), and next and previous page buttons.
 - Create-task form (with a project dropdown).
-- Suggest box: text in, draft shown, then a "Create this task" button that posts the draft.
+- Suggest box: text in, draft shown, then a "Create this task" button that posts the draft. The draft's `dueDate` and `priority` can be null (ADR-013), so the user fills them in before posting.
 - Error bodies are displayed readably, not swallowed.
 
 **Done when** a reviewer can do all of the above without a REST client.

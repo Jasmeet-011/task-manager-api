@@ -15,6 +15,8 @@ HTTP response (JSON)
 
 Any exception thrown on the way
   → GlobalExceptionHandler → ProblemDetail (ADR-005) → application/problem+json
+
+POST /tasks/suggest calls no repository. Its service calls AiClient instead (see the AI suggestion flow).
 ```
 
 ## Create a task: `POST /tasks`
@@ -119,23 +121,43 @@ DELETE /tasks/{id}/project
 
 `PUT /tasks/{id}` never touches the project. Only `moveTo` and `removeFromProject` change it.
 
-## AI suggestion: `POST /tasks/suggest`
+## AI suggestion: `POST /tasks/suggest` (M5)
+
+As built in M5 (ADR-013). Nothing is saved and nothing touches the database.
 
 ```
 { "text": "..." } → SuggestTaskRequest (@Valid)
-  blank or too long → 400 VALIDATION_FAILED
+  missing, blank or over 500 characters → 400 VALIDATION_FAILED, field text (the model is not called)
+  body is not JSON                      → 400 MALFORMED_REQUEST
+→ TaskSuggestionController (ai/)
 → TaskSuggestionService.suggest
-  no API key configured              → 503 AI_NOT_CONFIGURED
-  build prompt (includes today's date from Clock)
-  → AiClient.complete (AnthropicAiClient over RestClient, explicit timeouts)
-      timeout                        → 504 AI_TIMEOUT
-      HTTP error / unreachable       → 502 AI_UPSTREAM_ERROR
-  parse model text as JSON           fails → 502 AI_OUTPUT_INVALID (raw output logged, truncated)
-  validate fields (title, priority, dueDate)
-                                     fails → 502 AI_OUTPUT_INVALID
-  build draft, status always TODO
-→ 200 draft (same shape as CreateTaskRequest), nothing saved
+  system prompt with today's date and weekday from the Clock ("Today is Saturday, 2026-11-21.")
+  tool create_task_draft with a strict schema (four fields, nullable optional ones, no extra fields)
+→ AiClient.callTool (AnthropicAiClient)
+  no key, or a blank one              → 503 AI_NOT_CONFIGURED (checked first, no request sent)
+  POST {base-url}/v1/messages
+      headers: x-api-key, anthropic-version 2026-10-21
+      body:    model from config, max_tokens 4096, effort low,
+               tool_choice auto with at most one call (not forced)
+  connect or read timeout             → 504 AI_TIMEOUT
+  400, 401, 403, 404                  → 502 AI_UPSTREAM_ERROR, logged at ERROR (the operator must fix something)
+  429, 5xx, 529, refused, unknown host → 502 AI_UPSTREAM_ERROR, logged at WARN
+  2xx:
+    body not JSON, stop_reason not tool_use, not exactly one create_task_draft call, call without input
+                                      → 502 AI_OUTPUT_INVALID
+  returns the call's input (thinking and text blocks are ignored)
+← TaskSuggestionService validates the input
+    not an object, an extra field, title missing / blank / not a string / over 200 characters,
+    description over 2000, priority not exactly LOW|MEDIUM|HIGH, dueDate not a real yyyy-MM-dd
+                                      → 502 AI_OUTPUT_INVALID
+    title trimmed, blank description → null, a missing optional field → null, past dates allowed
+→ 200 TaskDraft { title, description, dueDate, priority }
+    all four keys always present, nulls included, no status
 ```
+
+**Logging:** each AI failure is logged once, by `GlobalExceptionHandler`, from the exception's message. The client only ever gets a fixed `detail`. Invalid output is logged with the raw output, cut to 1,000 characters and without thinking blocks. The key is removed from anything the client builds, and the user's text is never logged.
+
+**After the draft:** the user fills any null `dueDate` or `priority`, then sends it to `POST /tasks`, where the normal validation runs again and the task starts as TODO.
 
 ## Unexpected failure
 
