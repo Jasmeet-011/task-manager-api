@@ -18,6 +18,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -71,6 +72,38 @@ class TaskVersioningIntegrationTest {
     private ResultActions putTask(long id, String title, long version) throws Exception {
         return mockMvc.perform(put("/tasks/" + id)
                 .contentType(MediaType.APPLICATION_JSON).content(updateJson(title, version)));
+    }
+
+    /** Starts all requests together (behind a latch) and returns their HTTP statuses, in the order given. */
+    private static List<Integer> runAtTheSameTime(List<Callable<Integer>> requests) throws Exception {
+        CountDownLatch go = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(requests.size());
+        try {
+            List<Future<Integer>> futures = new ArrayList<>();
+            for (Callable<Integer> request : requests) {
+                futures.add(pool.submit(() -> {
+                    go.await();
+                    return request.call();
+                }));
+            }
+            go.countDown();
+            List<Integer> statuses = new ArrayList<>();
+            for (Future<Integer> future : futures) {
+                statuses.add(future.get());
+            }
+            return statuses;
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    private int assignStatus(long taskId, long projectId) throws Exception {
+        return mockMvc.perform(put("/tasks/" + taskId + "/project/" + projectId))
+                .andReturn().getResponse().getStatus();
+    }
+
+    private int deleteStatus(long taskId) throws Exception {
+        return mockMvc.perform(delete("/tasks/" + taskId)).andReturn().getResponse().getStatus();
     }
 
     /** The whole ADR-005 body of a version conflict, not just the status. */
@@ -336,5 +369,73 @@ class TaskVersioningIntegrationTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    // ---------- delete never looks at the version ----------
+
+    @Test
+    void delete_succeedsWhateverTheVersionIs() throws Exception {
+        long id = idOf(createTask("Start"));
+        putTask(id, "Edited", 0).andExpect(status().isOk());
+        putTask(id, "Edited again", 1).andExpect(status().isOk());
+
+        // The task is at version 2. There is no version to send, and none is needed.
+        mockMvc.perform(delete("/tasks/" + id)).andExpect(status().isNoContent());
+        mockMvc.perform(get("/tasks/" + id)).andExpect(status().isNotFound());
+    }
+
+    @RepeatedTest(10)
+    void delete_twoConcurrentDeletes_oneSucceedsAndTheOtherIsNotFound() throws Exception {
+        long id = idOf(createTask("Start"));
+
+        List<Integer> statuses = runAtTheSameTime(List.of(() -> deleteStatus(id), () -> deleteStatus(id)));
+
+        // The second one finds nothing to delete. Deleting the loaded entity would have made it a 500.
+        assertThat(statuses).containsExactlyInAnyOrder(204, 404);
+    }
+
+    @RepeatedTest(10)
+    void delete_racingAnUpdate_deleteAlwaysWins() throws Exception {
+        long id = idOf(createTask("Start"));
+
+        List<Integer> statuses = runAtTheSameTime(List.of(
+                () -> deleteStatus(id),
+                () -> putTask(id, "Edited", 0).andReturn().getResponse().getStatus()));
+
+        assertThat(statuses.get(0)).isEqualTo(204);
+        // The update either ran first (200), found the task already gone (404), or lost the race (409).
+        assertThat(statuses.get(1)).isIn(200, 404, 409);
+        mockMvc.perform(get("/tasks/" + id)).andExpect(status().isNotFound());
+    }
+
+    // ---------- assign and unassign under a race: 200 or 409, never a 500 ----------
+
+    @RepeatedTest(10)
+    void assign_twoConcurrentAssignsToDifferentProjects_neverAnError() throws Exception {
+        long id = idOf(createTask("Start"));
+        long work = createProject("Work");
+        long home = createProject("Home");
+
+        List<Integer> statuses = runAtTheSameTime(List.of(() -> assignStatus(id, work), () -> assignStatus(id, home)));
+
+        // Not "last write wins": a request that loses the race is told so (409) and can retry.
+        assertThat(statuses).allSatisfy(code -> assertThat(code).isIn(200, 409));
+        assertThat(statuses).contains(200);
+        long finalProject = ((Number) JsonPath.read(
+                mockMvc.perform(get("/tasks/" + id)).andReturn().getResponse().getContentAsString(),
+                "$.projectId")).longValue();
+        assertThat(finalProject).isIn(work, home);
+    }
+
+    @RepeatedTest(10)
+    void assign_racingAnUpdate_neverAnError() throws Exception {
+        long id = idOf(createTask("Start"));
+        long work = createProject("Work");
+
+        List<Integer> statuses = runAtTheSameTime(List.of(
+                () -> assignStatus(id, work),
+                () -> putTask(id, "Edited", 0).andReturn().getResponse().getStatus()));
+
+        assertThat(statuses).allSatisfy(code -> assertThat(code).isIn(200, 409));
     }
 }

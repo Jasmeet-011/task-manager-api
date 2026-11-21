@@ -284,23 +284,23 @@ class TaskServiceTest {
     }
 
     @Test
-    void delete_removesTask() {
-        Task existing = taskWithId(3L, "A", null, LocalDate.of(2026, 12, 1), Priority.LOW, Status.TODO);
-        when(taskRepository.findById(3L)).thenReturn(Optional.of(existing));
+    void delete_removesTheRowWithoutLoadingTheTask() {
+        when(taskRepository.deleteWithoutVersionCheck(3L)).thenReturn(1);
 
         taskService.delete(3L);
 
-        verify(taskRepository).delete(existing);
+        verify(taskRepository).deleteWithoutVersionCheck(3L);
+        // Not loaded, so there is no version to compare and no entity delete that Hibernate would guard.
+        verify(taskRepository, never()).findById(any());
     }
 
     @Test
-    void delete_missingId_throwsNotFoundAndDeletesNothing() {
-        when(taskRepository.findById(99L)).thenReturn(Optional.empty());
+    void delete_noRowDeleted_throwsNotFound() {
+        when(taskRepository.deleteWithoutVersionCheck(99L)).thenReturn(0);
 
-        assertThatThrownBy(() -> taskService.delete(99L)).isInstanceOf(NotFoundException.class);
-
-        // any(Task.class), not any(): JpaSpecificationExecutor adds a delete(Specification) overload.
-        verify(taskRepository, never()).delete(any(Task.class));
+        assertThatThrownBy(() -> taskService.delete(99L))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessage("Task 99 not found");
     }
 
     // ---------- project assignment ----------
@@ -332,6 +332,20 @@ class TaskServiceTest {
         TaskResponse response = taskService.assignProject(1L, 10L);
 
         assertThat(response.version()).isEqualTo(1L);
+    }
+
+    @Test
+    void assignProject_flushLosesTheRace_mapsToVersionConflict() {
+        Task task = taskWithId(1L, "A", null, LocalDate.of(2026, 12, 1), Priority.LOW, Status.TODO);
+        when(taskRepository.findById(1L)).thenReturn(Optional.of(task));
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(projectWithId(10L, "Home")));
+        doThrow(new ObjectOptimisticLockingFailureException(Task.class, 1L)).when(taskRepository).flush();
+
+        assertThatThrownBy(() -> taskService.assignProject(1L, 10L))
+                .isInstanceOfSatisfying(ConflictException.class, conflict -> {
+                    assertThat(conflict.getCode()).isEqualTo("VERSION_CONFLICT");
+                    assertThat(conflict.getFieldErrors()).isEmpty();
+                });
     }
 
     @Test
@@ -394,6 +408,18 @@ class TaskServiceTest {
         taskService.unassignProject(1L);
 
         assertThat(task.getProject()).isNull();
+    }
+
+    @Test
+    void unassignProject_flushLosesTheRace_mapsToVersionConflict() {
+        Task task = taskWithId(1L, "A", null, LocalDate.of(2026, 12, 1), Priority.LOW, Status.TODO);
+        task.moveTo(projectWithId(10L, "Home"));
+        when(taskRepository.findById(1L)).thenReturn(Optional.of(task));
+        doThrow(new ObjectOptimisticLockingFailureException(Task.class, 1L)).when(taskRepository).flush();
+
+        assertThatThrownBy(() -> taskService.unassignProject(1L))
+                .isInstanceOfSatisfying(ConflictException.class,
+                        conflict -> assertThat(conflict.getCode()).isEqualTo("VERSION_CONFLICT"));
     }
 
     @Test

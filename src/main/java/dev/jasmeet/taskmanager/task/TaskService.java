@@ -81,14 +81,24 @@ public class TaskService {
         return TaskResponse.from(task);
     }
 
+    /**
+     * Deleting means "I want this task gone", whatever its version (ADR-014), so there is no version check.
+     * It is a bulk delete by id: deleting the loaded entity would make Hibernate add "AND version = ?", and a
+     * concurrent edit (or a second delete) between the load and the delete would then fail with a 500.
+     * No row deleted means the task does not exist (or was just deleted by someone else): 404.
+     */
     @Transactional
     public void delete(Long id) {
-        taskRepository.delete(findOrThrow(id));
+        if (taskRepository.deleteWithoutVersionCheck(id) == 0) {
+            throw new NotFoundException("Task", id);
+        }
     }
 
     /**
      * Sets the task's project, moving it if it was in another one. Calling it again with the same
-     * project changes nothing: Hibernate sees no difference, so it runs no UPDATE.
+     * project changes nothing: Hibernate sees no difference, so it runs no UPDATE. The client sends no
+     * version (ADR-014), but Hibernate still guards the UPDATE with the loaded one, so a change that
+     * slips in between our load and our flush is a 409 VERSION_CONFLICT, and the client just retries.
      */
     @Transactional
     public TaskResponse assignProject(Long taskId, Long projectId) {
@@ -99,7 +109,7 @@ public class TaskService {
         task.moveTo(project);
         // Flush so the response carries the new version. If the project did not change, Hibernate runs no
         // UPDATE and the version stays the same.
-        taskRepository.flush();
+        flushOrConflict(taskId);
         return TaskResponse.from(task);
     }
 
@@ -107,6 +117,9 @@ public class TaskService {
     @Transactional
     public void unassignProject(Long taskId) {
         findOrThrow(taskId).removeFromProject();
+        // No response to build, but flush anyway: left to commit time, a lost race would throw after this
+        // method returned, outside flushOrConflict, and become a 500.
+        flushOrConflict(taskId);
     }
 
     /**
