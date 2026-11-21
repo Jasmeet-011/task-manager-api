@@ -1,5 +1,6 @@
 package dev.jasmeet.taskmanager.task;
 
+import dev.jasmeet.taskmanager.common.ConflictException;
 import dev.jasmeet.taskmanager.common.FieldViolation;
 import dev.jasmeet.taskmanager.common.InvalidRequestException;
 import dev.jasmeet.taskmanager.common.NotFoundException;
@@ -17,6 +18,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDate;
@@ -27,6 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -207,6 +210,68 @@ class TaskServiceTest {
 
         // 1 only if the response was built after the flush. Built before it, this would show 0.
         assertThat(response.version()).isEqualTo(1L);
+    }
+
+    @Test
+    void update_staleVersion_throwsVersionConflict_andChangesNothing() {
+        Task existing = taskWithId(5L, "Old", "old description",
+                LocalDate.of(2026, 1, 1), Priority.LOW, Status.TODO);
+        ReflectionTestUtils.setField(existing, "version", 3L);
+        when(taskRepository.findById(5L)).thenReturn(Optional.of(existing));
+
+        assertThatThrownBy(() -> taskService.update(5L,
+                new UpdateTaskRequest("New", null, LocalDate.of(2026, 12, 24), Priority.HIGH, Status.DONE, 2L)))
+                .isInstanceOfSatisfying(ConflictException.class, conflict -> {
+                    assertThat(conflict.getCode()).isEqualTo("VERSION_CONFLICT");
+                    assertThat(conflict.getFieldErrors()).isEmpty();
+                });
+
+        assertThat(existing.getTitle()).isEqualTo("Old");
+        assertThat(existing.getStatus()).isEqualTo(Status.TODO);
+        verify(taskRepository, never()).flush();
+    }
+
+    @Test
+    void update_versionAhead_isAlsoAConflict() {
+        // The client claims a version the row has not reached. It cannot have read that from us.
+        Task existing = taskWithId(5L, "Old", null, LocalDate.of(2026, 1, 1), Priority.LOW, Status.TODO);
+        when(taskRepository.findById(5L)).thenReturn(Optional.of(existing));
+
+        assertThatThrownBy(() -> taskService.update(5L,
+                new UpdateTaskRequest("New", null, LocalDate.of(2026, 12, 24), Priority.HIGH, Status.DONE, 1L)))
+                .isInstanceOf(ConflictException.class);
+    }
+
+    @Test
+    void update_versionsAbove127_compareByValue() {
+        // Long.valueOf caches only -128 to 127. Above that these are two different objects with the same value,
+        // so a comparison with == would wrongly report a conflict.
+        Long loaded = Long.valueOf(1000L);
+        Long sent = Long.valueOf(1000L);
+        assertThat(loaded).isNotSameAs(sent);
+        Task existing = taskWithId(5L, "Old", null, LocalDate.of(2026, 1, 1), Priority.LOW, Status.TODO);
+        ReflectionTestUtils.setField(existing, "version", loaded);
+        when(taskRepository.findById(5L)).thenReturn(Optional.of(existing));
+
+        TaskResponse response = taskService.update(5L,
+                new UpdateTaskRequest("New", null, LocalDate.of(2026, 12, 24), Priority.HIGH, Status.DONE, sent));
+
+        assertThat(response.title()).isEqualTo("New");
+    }
+
+    @Test
+    void update_flushLosesTheRace_mapsToTheSameConflict() {
+        Task existing = taskWithId(5L, "Old", null, LocalDate.of(2026, 1, 1), Priority.LOW, Status.TODO);
+        when(taskRepository.findById(5L)).thenReturn(Optional.of(existing));
+        // Another request committed a change after our load, so the UPDATE matched no row.
+        doThrow(new ObjectOptimisticLockingFailureException(Task.class, 5L)).when(taskRepository).flush();
+
+        assertThatThrownBy(() -> taskService.update(5L,
+                new UpdateTaskRequest("New", null, LocalDate.of(2026, 12, 24), Priority.HIGH, Status.DONE, 0L)))
+                .isInstanceOfSatisfying(ConflictException.class, conflict -> {
+                    assertThat(conflict.getCode()).isEqualTo("VERSION_CONFLICT");
+                    assertThat(conflict.getFieldErrors()).isEmpty();
+                });
     }
 
     @Test

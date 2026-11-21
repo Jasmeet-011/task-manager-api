@@ -1,19 +1,24 @@
 package dev.jasmeet.taskmanager.task;
 
+import dev.jasmeet.taskmanager.common.ConflictException;
 import dev.jasmeet.taskmanager.common.InvalidRequestException;
 import dev.jasmeet.taskmanager.common.NotFoundException;
 import dev.jasmeet.taskmanager.common.PageResponse;
 import dev.jasmeet.taskmanager.project.Project;
 import dev.jasmeet.taskmanager.project.ProjectRepository;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Objects;
 
 @Service
 @Transactional(readOnly = true)
 public class TaskService {
+
+    static final String VERSION_CONFLICT = "VERSION_CONFLICT";
 
     private final TaskRepository taskRepository;
     private final ProjectRepository projectRepository;
@@ -56,6 +61,12 @@ public class TaskService {
     @Transactional
     public TaskResponse update(Long id, UpdateTaskRequest request) {
         Task task = findOrThrow(id);
+        // Compare the version the client last saw with the row we just loaded. @Version cannot do this: it
+        // only guards the time between this load and the flush, and never sees the client's number.
+        // Objects.equals, not ==: two Long objects above 127 are equal in value but not the same object.
+        if (!Objects.equals(task.getVersion(), request.version())) {
+            throw versionConflict(id);
+        }
         task.update(
                 request.title(),
                 request.description(),
@@ -64,8 +75,9 @@ public class TaskService {
                 request.status());
         // No save (the entity is managed), but an explicit flush: @Version only increments when the UPDATE
         // runs. Left to commit time, the response below would show the old version and the client's next
-        // PUT would get a false 409.
-        taskRepository.flush();
+        // PUT would get a false 409. The flush is also where a write that slipped in after our load is
+        // detected, and flushOrConflict turns that into the same 409 as the comparison above.
+        flushOrConflict(id);
         return TaskResponse.from(task);
     }
 
@@ -95,6 +107,28 @@ public class TaskService {
     @Transactional
     public void unassignProject(Long taskId) {
         findOrThrow(taskId).removeFromProject();
+    }
+
+    /**
+     * Writes the pending changes now. Hibernate runs the UPDATE as "... WHERE id = ? AND version = <loaded>",
+     * so if another request committed a change after our load, no row matches and it throws. That is the
+     * same situation as a stale client version, so it gets the same 409. Without this catch it would
+     * be a 500. The flush goes through the repository proxy, which turns Hibernate's exception into
+     * Spring's ObjectOptimisticLockingFailureException.
+     */
+    private void flushOrConflict(Long id) {
+        try {
+            taskRepository.flush();
+        } catch (ObjectOptimisticLockingFailureException ex) {
+            throw versionConflict(id);
+        }
+    }
+
+    // fieldErrors is empty (ADR-005): the client's version was a stale snapshot, not an invalid value.
+    private static ConflictException versionConflict(Long id) {
+        return new ConflictException(VERSION_CONFLICT,
+                "Task " + id + " was changed by someone else since you loaded it. Fetch it again and retry.",
+                List.of());
     }
 
     private Task findOrThrow(Long id) {
