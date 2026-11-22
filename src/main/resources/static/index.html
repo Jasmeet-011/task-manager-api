@@ -25,6 +25,16 @@
   .error p { margin: 0.25rem 0 0; }
   .error ul { margin: 0.25rem 0 0; padding-left: 1.25rem; }
   .pager { margin-top: 0.75rem; display: flex; gap: 1rem; align-items: center; }
+  .ok { background: #dafbe1; border: 1px solid #7ee2a0; border-radius: 4px; padding: 0.5rem 0.75rem; margin-top: 0.75rem; }
+  .field { margin-bottom: 0.75rem; }
+  .field label { display: block; margin: 0 0 0.2rem; font-size: 0.9rem; }
+  .field input[type="text"], .field textarea { width: 100%; box-sizing: border-box; }
+  .row { display: flex; gap: 1rem; }
+  .field-error { color: #b42318; font-size: 0.9rem; margin-top: 0.2rem; }
+  .invalid { border: 2px solid #cf222e; }
+  /* A field the model left empty: the user has to fill it in before creating the task. */
+  .needs-input { background: #fff8c5; border: 2px solid #d4a72c; }
+  .suggest { margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid #e4e8ec; }
 </style>
 </head>
 <body>
@@ -50,6 +60,50 @@
     <span id="page-info" class="muted"></span>
     <button type="button" id="next-page">Next</button>
   </div>
+</section>
+
+<section id="new-task">
+  <h2>New task</h2>
+
+  <div class="suggest">
+    <div class="field">
+      <label for="suggest-text">Suggest from a note (the AI fills the form below, you check it and create the task)</label>
+      <textarea id="suggest-text" rows="2" placeholder="For example: urgent, send the report by Friday"></textarea>
+    </div>
+    <button type="button" id="suggest-button">Suggest</button>
+    <p id="suggest-note" class="muted" hidden></p>
+    <div id="suggest-error" class="error" role="alert" hidden></div>
+  </div>
+
+  <!-- novalidate and no required or maxlength: the API is the one place that validates, so its
+       field errors are what the user sees. -->
+  <form id="create-form" novalidate>
+    <div class="field">
+      <label for="field-title">Title</label>
+      <input type="text" id="field-title">
+      <div id="error-title" class="field-error" hidden></div>
+    </div>
+    <div class="field">
+      <label for="field-description">Description (optional)</label>
+      <textarea id="field-description" rows="2"></textarea>
+      <div id="error-description" class="field-error" hidden></div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="field-dueDate">Due date</label>
+        <input type="date" id="field-dueDate">
+        <div id="error-dueDate" class="field-error" hidden></div>
+      </div>
+      <div class="field">
+        <label for="field-priority">Priority</label>
+        <select id="field-priority"></select>
+        <div id="error-priority" class="field-error" hidden></div>
+      </div>
+    </div>
+    <button type="submit" id="create-button">Create task</button>
+    <div id="create-ok" class="ok" role="status" hidden></div>
+    <div id="create-error" class="error" role="alert" hidden></div>
+  </form>
 </section>
 
 <script>
@@ -309,6 +363,145 @@ async function loadProjects() {
   }
 }
 
+// ---------- the create form ----------
+
+// The form fields have the same names as the fields of POST /tasks, so a field error from the API
+// ("dueDate: must not be null") goes straight to the input with that name.
+const FORM_FIELDS = ['title', 'description', 'dueDate', 'priority'];
+
+function input(name) {
+  return byId('field-' + name);
+}
+
+function setFieldError(name, message) {
+  const box = byId('error-' + name);
+  box.textContent = message;
+  box.hidden = message === '';
+  input(name).classList.toggle('invalid', message !== '');
+}
+
+// Hides the messages of the last create attempt. The yellow "fill this in" marks are not touched.
+function clearCreateMessages() {
+  for (const name of FORM_FIELDS) {
+    setFieldError(name, '');
+  }
+  byId('create-ok').hidden = true;
+  renderProblem(byId('create-error'), null);
+}
+
+function formBody() {
+  // The title is sent as typed. An empty date, priority or description is sent as null, so a missing
+  // required field gets the API's own 400 and not a made-up message.
+  return {
+    title: input('title').value,
+    description: input('description').value || null,
+    dueDate: input('dueDate').value || null,
+    priority: input('priority').value || null
+  };
+}
+
+function showCreateError(error) {
+  if (!(error instanceof ApiError)) {
+    showError(byId('create-error'), error);
+    return;
+  }
+  const problem = error.problem;
+  const messages = {};
+  const unmatched = [];
+  for (const fieldError of problem.fieldErrors) {
+    if (FORM_FIELDS.includes(fieldError.field)) {
+      (messages[fieldError.field] = messages[fieldError.field] || []).push(fieldError.message);
+    } else {
+      unmatched.push(fieldError);
+    }
+  }
+  for (const name of Object.keys(messages)) {
+    setFieldError(name, messages[name].join(', '));
+  }
+  // The box keeps the title and detail, and lists only the field errors that have no input.
+  renderProblem(byId('create-error'), {
+    status: problem.status, title: problem.title, detail: problem.detail, code: problem.code, fieldErrors: unmatched
+  });
+}
+
+function anyFilterActive() {
+  return ['filter-status', 'filter-priority', 'filter-project'].some(function (id) {
+    return byId(id).value !== '';
+  });
+}
+
+async function createTask(event) {
+  event.preventDefault();
+  const button = byId('create-button');
+  clearCreateMessages();
+  button.disabled = true;  // a second click while the request runs would create a second task
+  try {
+    const task = await api('POST', '/tasks', formBody());
+    byId('create-form').reset();
+    for (const name of FORM_FIELDS) {
+      input(name).classList.remove('needs-input');
+    }
+    byId('suggest-note').hidden = true;
+    byId('create-ok').textContent = 'Created task #' + task.id + ': ' + task.title
+        + (anyFilterActive() ? ' (it is not shown below if a filter excludes it)' : '');
+    byId('create-ok').hidden = false;
+    state.page = 0;
+    await loadTasks();
+  } catch (error) {
+    showCreateError(error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// ---------- AI suggestion ----------
+
+// The draft fills the form and nothing is saved. A field the model left null stays empty and is marked,
+// so the user fills it in. Only dueDate and priority are marked: the API requires them to create a
+// task, while a missing description is fine (ADR-003, ADR-013).
+function fillFormFromDraft(draft) {
+  clearCreateMessages();
+  const values = {
+    title: text(draft.title),
+    description: text(draft.description),
+    dueDate: text(draft.dueDate),
+    priority: text(draft.priority)
+  };
+  for (const name of FORM_FIELDS) {
+    input(name).value = values[name];
+    input(name).classList.remove('needs-input');
+  }
+  const missing = [];
+  for (const name of ['dueDate', 'priority']) {
+    if (values[name] === '') {
+      input(name).classList.add('needs-input');
+      missing.push(name === 'dueDate' ? 'due date' : 'priority');
+    }
+  }
+  const note = byId('suggest-note');
+  note.textContent = missing.length === 0
+      ? 'Draft filled in below. Check it, then click Create task.'
+      : 'Draft filled in below. Your note did not say the ' + missing.join(' or ')
+          + ': fill in the highlighted field' + (missing.length === 1 ? '' : 's') + ', then click Create task.';
+  note.hidden = false;
+}
+
+async function suggest() {
+  const button = byId('suggest-button');
+  renderProblem(byId('suggest-error'), null);
+  byId('suggest-note').hidden = true;
+  button.disabled = true;
+  button.textContent = 'Suggesting...';  // the call can take several seconds
+  try {
+    fillFormFromDraft(await api('POST', '/tasks/suggest', { text: byId('suggest-text').value }));
+  } catch (error) {
+    showError(byId('suggest-error'), error);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Suggest';
+  }
+}
+
 // ---------- start ----------
 
 function changeFilter() {
@@ -330,6 +523,19 @@ byId('next-page').addEventListener('click', function () {
   state.page = state.page + 1;
   loadTasks();
 });
+
+fillSelect(input('priority'), plainOptions(PRIORITIES), '(choose)');
+for (const name of FORM_FIELDS) {
+  // Editing a marked or rejected field removes its mark.
+  for (const type of ['input', 'change']) {
+    input(name).addEventListener(type, function () {
+      input(name).classList.remove('needs-input');
+      setFieldError(name, '');
+    });
+  }
+}
+byId('create-form').addEventListener('submit', createTask);
+byId('suggest-button').addEventListener('click', suggest);
 
 clearList();
 loadProjects();
