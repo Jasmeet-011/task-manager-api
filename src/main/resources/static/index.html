@@ -48,6 +48,10 @@
     <label>Project <select id="filter-project"></select></label>
   </div>
   <div id="projects-error" class="error" role="alert" hidden></div>
+  <div id="list-ok" class="ok" role="status" hidden></div>
+  <!-- Errors of a status change. Separate from list-error, because reloading the list after a 409
+       would hide a message that shared its box. -->
+  <div id="action-error" class="error" role="alert" hidden></div>
   <div id="list-error" class="error" role="alert" hidden></div>
   <table>
     <thead>
@@ -60,6 +64,8 @@
     <span id="page-info" class="muted"></span>
     <button type="button" id="next-page">Next</button>
   </div>
+  <p class="muted">To see a version conflict: open this page in two tabs, change a task's status in one,
+    then change the same task in the other tab, whose list is now out of date.</p>
 </section>
 
 <section id="new-task">
@@ -274,6 +280,23 @@ function cell(row, content, className) {
   return td;
 }
 
+// The only edit the page offers: change a task's status.
+function statusSelect(task) {
+  const select = element('select');
+  for (const status of STATUSES) {
+    const option = element('option', status);
+    option.value = status;
+    select.append(option);
+  }
+  select.value = task.status;
+  // An attribute is set as text, never parsed as HTML, so a task title in it is safe.
+  select.setAttribute('aria-label', 'Status of ' + task.title);
+  select.addEventListener('change', function () {
+    changeStatus(task, select);
+  });
+  return select;
+}
+
 function taskRow(task) {
   const row = element('tr');
   const title = element('div');
@@ -285,7 +308,7 @@ function taskRow(task) {
   cell(row, task.dueDate);
   // The class comes from a fixed list, never from the response text.
   cell(row, task.priority, PRIORITIES.includes(task.priority) ? 'prio-' + task.priority : '');
-  cell(row, task.status);
+  cell(row, statusSelect(task));
   if (task.projectName) {
     cell(row, task.projectName);
   } else {
@@ -363,6 +386,61 @@ async function loadProjects() {
   }
 }
 
+// ---------- one result at a time ----------
+
+// The page shows the result of the latest action only. Every action (filter, paging, suggest, create,
+// status change) starts by hiding the results of the earlier ones, so an old success never sits next
+// to a new error. A result stays until the next action starts: there is no timer.
+// The yellow marks and the suggest note describe the state of the form, not a result, so they stay.
+function clearResults() {
+  clearCreateMessages();
+  byId('list-ok').hidden = true;
+  for (const id of ['suggest-error', 'action-error', 'list-error']) {
+    renderProblem(byId(id), null);
+  }
+}
+
+// ---------- changing a status ----------
+
+async function changeStatus(task, select) {
+  clearResults();
+  select.disabled = true;  // one request at a time for this row
+  try {
+    // PUT replaces the whole task (ADR-010), so every field is sent, not only the status. The version
+    // is the one from the last load. If someone changed the task since, the API answers 409 (ADR-014).
+    const updated = await api('PUT', '/tasks/' + task.id, {
+      title: task.title,
+      description: task.description,
+      dueDate: task.dueDate,
+      priority: task.priority,
+      status: select.value,
+      version: task.version
+    });
+    byId('list-ok').textContent = 'Task #' + updated.id + ' is now ' + updated.status + '.';
+    byId('list-ok').hidden = false;
+    await loadTasks();
+  } catch (error) {
+    select.value = task.status;  // the change did not happen, so show the status the task still has
+    if (error instanceof ApiError && error.problem.status === 409 && error.problem.code === 'VERSION_CONFLICT') {
+      renderProblem(byId('action-error'), {
+        status: 409,
+        title: 'This task was changed elsewhere',
+        detail: 'The list has been reloaded with the current data. Make the change again if you still want it.',
+        code: error.problem.code,
+        fieldErrors: []
+      });
+      await loadTasks();  // the user sees the current data, and the current version for the next try
+    } else {
+      showError(byId('action-error'), error);
+      if (error instanceof ApiError && error.problem.status === 404) {
+        await loadTasks();  // the task is gone, so the list should not show it
+      }
+    }
+  } finally {
+    select.disabled = false;
+  }
+}
+
 // ---------- the create form ----------
 
 // The form fields have the same names as the fields of POST /tasks, so a field error from the API
@@ -433,7 +511,7 @@ function anyFilterActive() {
 async function createTask(event) {
   event.preventDefault();
   const button = byId('create-button');
-  clearCreateMessages();
+  clearResults();
   button.disabled = true;  // a second click while the request runs would create a second task
   try {
     const task = await api('POST', '/tasks', formBody());
@@ -488,7 +566,7 @@ function fillFormFromDraft(draft) {
 
 async function suggest() {
   const button = byId('suggest-button');
-  renderProblem(byId('suggest-error'), null);
+  clearResults();
   byId('suggest-note').hidden = true;
   button.disabled = true;
   button.textContent = 'Suggesting...';  // the call can take several seconds
@@ -505,6 +583,7 @@ async function suggest() {
 // ---------- start ----------
 
 function changeFilter() {
+  clearResults();
   state.page = 0;
   loadTasks();
 }
@@ -516,10 +595,12 @@ for (const id of ['filter-status', 'filter-priority', 'filter-project']) {
   byId(id).addEventListener('change', changeFilter);
 }
 byId('prev-page').addEventListener('click', function () {
+  clearResults();
   state.page = Math.max(0, state.page - 1);
   loadTasks();
 });
 byId('next-page').addEventListener('click', function () {
+  clearResults();
   state.page = state.page + 1;
   loadTasks();
 });
