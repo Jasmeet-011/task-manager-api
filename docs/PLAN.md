@@ -161,13 +161,21 @@ Decisions are in ADR-013.
 
 ## M7: UI
 
-**Build** a single `src/main/resources/static/index.html` served at `/`:
-- Task list with at least one working filter (status, plus priority and project if cheap), and next and previous page buttons.
-- Create-task form (with a project dropdown).
-- Suggest box: text in, draft shown, then a "Create this task" button that posts the draft. The draft's `dueDate` and `priority` can be null (ADR-013), so the user fills them in before posting.
-- Error bodies are displayed readably, not swallowed.
+Decisions are in ADR-015. *(Changed from the first plan: no project dropdown on create, and Suggest fills the create form instead of posting the draft. Both are explained in ADR-015.)*
 
-**Done when** a reviewer can do all of the above without a REST client.
+**Build** a single `src/main/resources/static/index.html` served at `/`, plus demo data:
+- Task list with status, priority and project filters (single-select, each with "All"), a project column, and next and previous page buttons. No sort controls.
+- Create-task form. No project picker: it would need create-then-assign, two calls. It is listed as a next step.
+- Suggest box: the user types a note, and the draft fills the create form. A null `dueDate` or `priority` stays empty and is highlighted, and the user completes it and clicks Create (ADR-003, ADR-013).
+- A status dropdown on each row, the only edit. It sends a PUT with every field and the version, and a 409 shows "This task was changed elsewhere" and reloads the list (ADR-014).
+- Every API error is displayed readably from the ADR-005 body, and the page shows the result of the latest action only.
+- `demo/DemoDataSeeder`: about 2 projects and 8 tasks loaded through the services into an empty database at startup (`app.seed-demo-data`, true by default, false in tests through `src/test/resources/config/application.properties`).
+
+**Tests**
+- A smoke test that `/` serves the page and that the page never builds HTML from text.
+- The seed is off in tests, the seeder fills an empty database and only an empty one, and the property turns it on at startup (the seed tests use their own database URL).
+
+**Done when** a reviewer can do all of the above without a REST client, and `./mvnw spring-boot:run` serves the page at `http://localhost:8080/` with no other setup.
 
 ## M8: Hardening and submission prep
 

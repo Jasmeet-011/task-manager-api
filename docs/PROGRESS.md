@@ -11,7 +11,7 @@
 | M4: Filtering, sorting, pagination | Done | transcripts/04-filtering.md |
 | M5: AI suggest endpoint | Done | transcripts/05-ai-suggest.md |
 | M6: Optimistic locking | Done | transcripts/06-optimistic-locking.md |
-| M7: UI | Not started | |
+| M7: UI | Done | transcripts/07-ui.md |
 | M8: Hardening and submission prep | Not started | |
 
 ## Session log
@@ -28,6 +28,48 @@ Newest first. One entry per Claude Code session.
 - Manually verified:
 - Left for next session:
 ```
+
+### Session 07: M7 UI (2026-11-21)
+- Built (four code commits, plus the docs commit: `071862f` seed, `0599824` list page, `62e2b5b` create and suggest, `e92ba5e` status change):
+  - **Demo data:** `demo/DemoDataSeeder`, an `ApplicationRunner` that is only a bean when `app.seed-demo-data=true` (no default in code, `true` in the main `application.properties`). It seeds only an empty database (no projects and no tasks, checked through the services), through `ProjectService` and `TaskService` (create, assign, update with the previous response's version), with dates from the `Clock`. 2 projects and 8 tasks.
+  - **Page:** `static/index.html`, one file, no framework or CDN.
+    - **List:** status, priority and project filters, a project column and a version column, Previous and Next, 5 per page.
+    - **Create form:** field errors under the input they name.
+    - **Suggest:** the draft fills the form, and a null `dueDate` or `priority` is highlighted.
+    - **Status:** a status dropdown per row that sends the whole task plus the version, with a 409 message and reload.
+    - **Errors:** every error shown from the ADR-005 body, and a network failure or a non-JSON answer in the same shape.
+  - **One result at a time:** `clearResults()` runs first in every action (filter, paging, suggest, create, status change) and hides the earlier success and error messages. No timer.
+  - **Test config:** `src/test/resources/config/application.properties` sets the flag to `false`. Spring Boot loads it in addition to the main file.
+  - **Docs:** ADR-015, FLOW.md (the UI flows), the README UI section (what loads, that it vanishes on stop, how to turn it off), PLAN.md's M7 block (it still said "project dropdown" and "post the draft"), and the `demo/` line in CLAUDE.md.
+- Decisions settled: ADR-015 (the M7 pending item). Pointers added to ADR-003 (the UI fills the form and does not post the draft) and ADR-014 (the UI next step is done). Corrections to my first plan, from you:
+  - **Seed off in tests:** I proposed a surefire system property. You pointed out it breaks when tests run from the IDE. We used `config/application.properties`, and I checked on Boot 4.1.2 that it adds to the main file.
+  - **Stale messages:** you found that a green "Created" banner stayed next to a later error. `clearResults()` is the fix, and you agreed that clearing stale errors too is right.
+- Tests: `env -u ANTHROPIC_API_KEY ./mvnw clean test` passed, 352 tests, 0 failures (336 before, 16 new, no existing test changed).
+  - 3 `IndexPageTest`: `/` forwards to `index.html`, `/index.html` is served as HTML with the list, and the file contains no `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `eval(` or `new Function(`.
+  - 2 `SeedDisabledInTestsTest`: the flag is false and there is no seeder bean, and the main config (H2 URL, open-in-view, Jackson, model) is still in effect.
+  - 10 `DemoDataSeederTest` (own database URL, fixed clock, seed bean off): counts, relative dates, an overdue task that is not done and a mix of statuses and priorities, projects, versions (2, 1, 0), the default order, a priority sort (proves the rank), a second run adds nothing, and a database with only a project or only a task is not seeded.
+  - 1 `DemoDataStartupTest` (own database URL, seed on): the runner filled the database at startup.
+  - The other 336 are unchanged from M6. The only "Unhandled exception" in the log is the M2 test that throws on purpose.
+- **How the page JavaScript was verified (no repository test covers it).** By an **uncommitted Node harness plus a manual click-through**:
+  - **Harness:** it runs the page's real script against live instances with a small DOM stub. 83 assertions, all passing on the final clean build. It covers the list, filters and paging, create errors and success, suggest (full, partial, date-only, markup, 400, 502, 503), the PUT body, a real stale-version 409, a deleted task, a dead server, and the one-result-at-a-time rule. It used two instances: one with no key, and one with a dummy key and a fake model server on loopback, so nothing left the machine.
+  - **Mutations:** 30 mutated copies of the page (13 for create and suggest, 17 for status and banners). All were caught except one equivalent mutant (sending `""` for `dueDate` gets the same 400 as `null`).
+  - **Click-through:** you checked it in a real browser: default order, priority tiebreak, versions, paging and filters; empty create, a valid create and Suggest without a key; then with a real key the suggestion filled the form with the date and priority highlighted, the two-tab 409 showed "This task was changed elsewhere" and reloaded at the new version, the retry worked, and the banner cleared on the next action.
+  - The harness is not committed. A copy is in the session scratchpad (`check.mjs`, `fake-anthropic.mjs`).
+- **Mutation checks on the Java side, each after its commit and restored with `git checkout`:**
+  - C1 (seed): no emptiness check (3 tests failed), date offset flipped (2), hard-coded version in the status update (9), `@ConditionalOnProperty` removed (1), test config file deleted (1 of 349: only the guard test notices), the same file at `src/test/resources/application.properties` (all 13 demo tests errored).
+  - C2 (page): `innerHTML` for a title (1), `eval` added (1), `index.html` missing (3), list element id renamed (1).
+- Manually verified: cold `spring-boot:run` on a clean build, no key.
+  - **Default:** `/` is 200 `text/html`, the app starts in about 1.1s, logs "Demo data loaded: 2 projects and 8 tasks", and `GET /tasks` shows 8 tasks and 2 projects.
+  - **Seed off:** with `-Dspring-boot.run.arguments=--app.seed-demo-data=false` and with `APP_SEED_DEMO_DATA=false`, `/` still loads and there are 0 tasks and 0 projects.
+  - **Logs:** no "Unhandled exception" or `ERROR` in any app log, and the dummy key never appears.
+- Known gaps and limits:
+  - The page JavaScript has no automated test in the repository (see above), and it was checked in one browser.
+  - A 400 on the status PUT is untested: the page only sends values the API already accepted.
+  - The status and priority lists in the page copy the enums.
+  - The file contains literal `—` and `·` characters. They render because of the `<meta charset>`, and you chose to leave them.
+  - A test run straight from an IDE works because the test config is a classpath file, but I did not run one from an IDE.
+  - "Today" for the seed is the server's date.
+- Left for next session: M8 (hardening and submission prep). It must include the endpoint table, the error format section and the design decisions in the README. You export `transcripts/07-ui.md` and commit it yourself. Nothing is pushed.
 
 ### Session 06: M6 Optimistic locking (2026-11-21)
 - Built (four code commits, plus the docs commit: `7a161de` version and flush, `15a0e16` stale version is a 409, `de28a2b` assign, unassign and delete under a race, `34a3262` README):
@@ -219,3 +261,9 @@ Every time the model produced something wrong or poorly structured and I caught 
 | 06 | After that failed compile I ran my result summary on `target/surefire-reports` and printed "total 274, failures 3, errors 6". | Those reports were left over from the previous successful run, so the numbers described the old code. A summary of stale files looks like a result. | The compile errors were listed in the same output, so I treated the numbers as stale and deleted the reports. | Before each run I now remove `target/surefire-reports`, and I check Maven's exit code before reading any totals. |
 | 06 | My first mutation summary used a regex that dropped failure lines containing `->`, and it showed only 3 failing tests for "comparison removed". | It hid the sequential tests, which are the ones that pin that check. Reporting it would have under-sold the result and left a wrong picture of which test catches what. | The sequential test was missing from the list, and I expected it to fail. | Re-read the failure lines straight from the log. The real list had 7 failures. The corrected extraction was used for every later check. |
 | 06 | The plan said the HTTP race test "cannot choose" whether the comparison or the flush stops the loser, so a separate deterministic test was needed. | It was a guess, and not quite right. The mutation checks measured it: the race test reached the flush path 10 of 10 times, but caught a missing comparison only 1 of 10 times. The real-H2 probe I added for the flush path does not fail when the catch is removed, because it tests Hibernate directly. | I measured it with the mutation checks. You did not catch this one. | Kept the probe, but described each test for what it pins: the unit test pins the mapping, the probe pins the exception type, and the sequential tests pin the comparison. |
+| 07 | Planned to switch the seed off in tests with a surefire system property in `pom.xml`. | It only applies to Maven runs. A test run from the IDE, which could happen in the live session, would start with the seed on and fail with a confusing count mismatch. | You pointed it out in plan review. | Use `src/test/resources/config/application.properties`, which Spring Boot loads in addition to the main file. I checked it on Boot 4.1.2, and `SeedDisabledInTestsTest` pins that the main settings are still in effect. |
+| 07 | My first mutation checks of the test config file reported "passing": 349 tests green with the file deleted, and 13 green with it moved to the shadowing path. | `./mvnw test` without `clean` leaves the old copy in `target/test-classes`, so the file I had deleted was still on the classpath. In the second check a failed `cp` also meant the mutation never happened. A green result from a mutation that did not apply looks like proof. | Deleting the file changed nothing, which was suspicious. | Delete the stale copy from `target/test-classes` as part of every resource mutation, and print what is in that directory. The redone checks gave 1 failure (the guard test) and 13 errors (shadowing). |
+| 07 | Used `git mv` to move `index.html` aside for the "page is missing" mutation. | `git mv` stages the change, so `target/index.moved` was staged as a new file. The commit was not affected. | `git status` after the check showed `AD target/index.moved`. | `git rm --cached`. Mutations are now applied to copies outside the tracked file. |
+| 07 | Ran `./mvnw clean` while my log and the harness lived in `target/`. | `clean` deleted the log being written (so the result line was missing) and, later, the whole harness. I had said I would keep throwaway files in `target/`, but did not think about `clean`. | The missing log file, and "No such file" when I went to re-run the harness. | Rebuilt the harness, copied it to the scratchpad before the final `clean`, and avoided `clean` during the milestone. |
+| 07 | My first harness had loose assertions and shared state across runs. | Two mutations survived because earlier runs had left a "Pay the invoice" task at the top of the list, and no check created from page 2. One check searched for the word "filter" in a task titled "No filter", one expected title had a typo, and a date trick (years near 1775) made the database shift a date by a day. All were my bugs, not the page's, and a survivor like that would have looked like a gap in the page. | Each survivor and each failing check on the committed page. I looked at why instead of accepting the numbers. | The harness now deletes non-seed tasks at the start of each run, creates from page 2, and uses fixed dates. One survivor remained, an equivalent mutant I confirmed with curl. |
+| 07 | Designed the success banners without a rule for how long a result stays on screen. | A green "Created task" stayed after the user started another action, so a later Suggest error looked as if both had just happened. My harness checked each message in isolation and never checked two actions in a row. | You found it clicking through the page in the browser. | `clearResults()` runs first in every action, with no timer. The harness now has an "only the latest result is shown" section, and a mutation for each action that skips it. |

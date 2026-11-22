@@ -24,6 +24,7 @@ Each decision records what we chose, what else we considered, why, and the trade
 - **Options:** `/tasks/suggest`, `/tasks/{id}/breakdown`, `/tasks/query`.
 - **Why:** The model's output is untrusted. The endpoint turns plain language into a draft task and never writes to the database. The user confirms by calling `POST /tasks`, which runs the normal validation again. The draft has the same shape as the create request, so the UI can submit it directly.
 - **Tradeoff:** Two calls to create a task from text. Acceptable, and it keeps a human in the loop.
+- **Refined in M7 (ADR-015):** the page does not POST the draft directly. It fills the create form with the draft, the user completes any empty required field, and then clicks Create. A draft can have a null `dueDate` or `priority`, which `POST /tasks` rejects (ADR-010, ADR-013).
 
 ### ADR-004: Claude via `RestClient` behind an `AiClient` interface
 
@@ -323,7 +324,7 @@ Builds on ADR-007 (the stretch feature), ADR-005 (`VERSION_CONFLICT`, no new cod
 - Accept `If-Match` alongside the body field.
 - Merge edits that touch different fields.
 - A `version` on `PUT /projects/{id}` once project updates exist (ADR-011).
-- The UI (M7) sends the version with every update and shows "changed elsewhere, reload" on a 409.
+- ~~The UI (M7) sends the version with every update and shows "changed elsewhere, reload" on a 409.~~ Done in M7 (ADR-015).
 
 **Known limits**
 - The race tests are timing-based. In M6 the two-PUT test reached the flush check in 10 of 10 runs, but caught a missing comparison in only 1 of 10 (`@Version` alone stops most races), so the sequential tests are what pin the comparison.
@@ -332,9 +333,84 @@ Builds on ADR-007 (the stretch feature), ADR-005 (`VERSION_CONFLICT`, no new cod
 
 - **Tradeoff:** clients must send the version and handle a 409 by re-fetching, and there is no merge. Assign and unassign can return 409 although they take no version, but only when they collide with another write within milliseconds. A PUT that changes nothing does not raise the version.
 
+### ADR-015: The UI page and demo data (M7)
+
+Builds on ADR-003 and ADR-013 (the AI suggests, the human confirms), ADR-005 (the error body), ADR-010 and ADR-014 (PUT is a full replacement with a version).
+
+**One static page, no build**
+- `src/main/resources/static/index.html` holds the HTML, CSS and JavaScript. Spring Boot serves it at `/` with no configuration. No framework, no library, no CDN. **Why:** no build step, it works offline, and there is nothing extra to explain.
+- It needs no API change. It only calls the endpoints that already exist: `GET /tasks`, `GET /projects`, `POST /tasks`, `PUT /tasks/{id}`, `POST /tasks/suggest`.
+
+**What the page does**
+- **List:** status, priority and project filters, each single-select with "All". A project column. Previous and Next buttons, 5 tasks per page (a constant), so 8 seeded tasks show paging at once. A filter change goes back to page 0. No sort controls: the default order (ADR-012) is already the order a user wants, and sorting is built and tested in the API. The version is shown, so locking is visible.
+- **Create:** a form with title, description, due date and priority. There is no project picker. A picker would need create-then-assign, two calls with a possible half-done result, for something the assignment does not ask for. The project column and the filter already show the relational feature.
+- **Suggest:** the user types a note, and the draft **fills the create form**. A field that came back null stays empty. A null `dueDate` or `priority` is highlighted yellow, because the API requires both to create. A null `description` is not highlighted, because it is optional. The highlight clears when the user edits that field. A new draft replaces all four fields. **Why:** posting the draft directly would fail on nulls, and this keeps the human in the loop (refines ADR-003).
+- **Status change:** the only edit. Each row has a status dropdown. A change sends `PUT /tasks/{id}` with every field of the task, the new status and the version from the last load (the PUT is a full replacement, ADR-010). **Why this edit:** it shows optimistic locking live, since a stale version gives a 409. The assignment only requires creating tasks, so more editing is out of scope.
+  - **409 `VERSION_CONFLICT`:** the page shows "This task was changed elsewhere", puts the dropdown back and reloads the list, so the user sees the current data and the current version for the next try. The page's own text is used, not the API's detail. A 409 with any other code is shown as a normal error.
+  - **404:** the API error is shown and the list reloads, so the task is gone from it.
+  - **Any other error:** the error is shown and the dropdown goes back.
+  - To see a 409 by hand, open the page in two tabs, change a status in one, then change the same task in the other. A hint on the page says so.
+
+**Errors**
+- Every API error is shown from the ADR-005 body: `title`, `detail`, `code`, and each `fieldErrors` entry as "field: message". The page shows the server's text. It does not hardcode a copy, so it cannot drift from the API (the 503 shows "AI service not configured" and the API's detail naming `ANTHROPIC_API_KEY`).
+- On the create form a field error goes under the input it names, and the input is marked red. The box keeps the title and detail and lists only the errors that have no input. The note box shows a 400 on `text`.
+- A network failure ("Cannot reach the server"), an answer that is not JSON (Tomcat's HTML 400, shown as "HTTP 400 ...") and a bug in the page are turned into the same shape. A bug in the page is also logged with `console.error`, never swallowed.
+- **No client-side validation.** The form has `novalidate` and no `required` or `maxlength`. The API is the one place that validates, so the page copies none of the ADR-010 or ADR-013 limits and shows the API's own messages.
+
+**One result at a time**
+- A success banner that stayed on screen next to a later error looked as if both had just happened (found in a manual click-through). Every action (filter, paging, suggest, create, status change) now starts with `clearResults()`. It hides the success banners, the suggest, create and status-change errors, the create field errors and the list error. A result stays until the next action: there is no timer.
+- It does not hide the yellow marks and the suggest note, because those describe the form's state and not a result. It does not hide the project-load error, which is a page-load failure and not a result.
+- Status-change errors have their own box. The list reload after a 409 clears the list-error box, so a shared box would have erased the message.
+
+**XSS: text goes in as text**
+- Task titles, project names and AI drafts are untrusted. ADR-013's injection test showed the model can be steered, and the page shows the draft. Every piece of that text is set with `textContent`, `.value` or an attribute, never parsed as HTML. CSS classes come from fixed lists, not from response text.
+- `IndexPageTest` fails if the file contains `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `eval(` or `new Function(`. That cannot prove the page is safe. It fails the moment someone writes HTML into it.
+- Checked by hand: a task titled `<img src=x onerror=alert(1)>` with a `<script>` description, and an AI draft with the same text, stay literal text in the list, in the form fields and in the `aria-label`.
+
+**Demo data**
+- `demo/DemoDataSeeder` (new package: it uses `TaskService` and `ProjectService`, and nothing imports it). It is an `ApplicationRunner`, and the bean only exists when `app.seed-demo-data` is `true` (`@ConditionalOnProperty`, with no default in code, so a missing property means no seed). Main `application.properties` sets it to `true`.
+- **Only into an empty database:** no projects and no tasks, both checked through the services. Otherwise it logs that it did nothing. H2 is in memory with `create-drop`, so the data is loaded on every start and disappears on stop.
+- **Through the services**, so the priority rank (ADR-012) and the versions (ADR-014) are set by the code that runs for a real request. Create, then `assignProject`, then `update` for a status other than TODO, each using the version from the previous response. Seeded tasks therefore have version 0, 1 or 2.
+- **Dates come from the injected `Clock`**, relative to today, so the data never goes stale and tests can fix the date.
+- **A failure stops the startup.** The data is fixed and tested, so a failure is a bug, and an empty page would hide it.
+- **The data:** two projects (Website Launch, Home Renovation) and eight tasks. Statuses and priorities are mixed. One task is overdue and not done, one is overdue and done, and one has no project. Two tasks share a due date, so the priority tiebreak of the default order is visible. Some have descriptions and some do not.
+- **Turning it off:** `app.seed-demo-data=false` in `application.properties`, `./mvnw spring-boot:run -Dspring-boot.run.arguments=--app.seed-demo-data=false`, or the environment variable `APP_SEED_DEMO_DATA=false`. All three checked in M7: the app starts empty and the page still loads.
+
+**Keeping tests away from the seed**
+- Tests set the property to `false` in `src/test/resources/config/application.properties`. Spring Boot loads `classpath:/config/application.properties` **in addition to** `classpath:/application.properties`, and the `config/` one wins for the keys it sets. So that file adds one setting and the main file stays in effect (H2, Jackson, AI). It works the same from Maven and from an IDE.
+- **Never create `src/test/resources/application.properties`.** It has the same path as the main file, so it replaces it during tests, and the H2, Jackson and AI settings disappear. Checked in M7 by moving the file there: all 13 demo tests failed.
+- `SeedDisabledInTestsTest` pins both facts: the flag is `false` and there is no seeder bean, and one setting from each part of the main file is still in effect. It is the only test that notices if the file goes missing: with the file deleted, the seed turned on in the default context and 1 of 349 tests failed, because the other tests wipe their tables in `@BeforeEach`.
+- **The seed tests use their own database URL.** All cached test contexts share the in-memory database `jdbc:h2:mem:taskmanager`. A context that seeded it would leave rows for whichever test class ran next.
+- **Options considered:** a surefire system property in `pom.xml` (breaks when a test runs from the IDE, which could happen in the live session), `properties` on each of 17 test classes and a `test` profile with `@ActiveProfiles` (both easy to forget on a new class), and a flag set only for `spring-boot:run` (contradicts "true by default").
+
+**Tests and how the page was checked**
+- JVM tests: `IndexPageTest` (3: `/` forwards to `index.html`, the file is served as HTML, no HTML-building calls), `SeedDisabledInTestsTest` (2), `DemoDataSeederTest` (10: data, relative dates, versions, default order, rank through a priority sort, a second run adds nothing, a database with only a project or only a task is not seeded) and `DemoDataStartupTest` (1: the property turns the runner on at startup). MockMvc does not follow the forward from `/`, so real HTTP on `/` was checked with curl.
+- **The page's JavaScript has no automated test in the repository.** It was checked two ways. First, an uncommitted Node harness that runs the page's real script against live instances with a small DOM stub (83 assertions, including a real stale-version PUT, a deleted task, a dead server and markup in titles), and 30 mutated copies of the page, all caught except one equivalent mutant. The second instance used a dummy key and a fake model on loopback, so nothing left the machine. Second, a manual click-through in a real browser, including a real-key suggestion, the two-tab 409 and the banner clearing. The harness is not committed because the assignment asks for no UI tests and it is throwaway tooling.
+
+**Settled from the M7 pending list:** seed on startup, on by default, off in tests through `config/application.properties` and not through a file that shadows the main one.
+
+**Out of scope:** editing anything but status, a project picker, creating or deleting projects or tasks in the UI, sort controls, overdue highlighting, a framework or build tooling.
+
+**Next steps**
+- A project picker. The API has no `projectId` on create, so either `POST /tasks` accepts it or the page does create-then-assign.
+- Sort controls, which only need to send `sort` (the API validates it).
+- Highlight overdue tasks. The seed already has one.
+- Edit more than the status, and delete.
+- Browser tests (for example Playwright) to replace the uncommitted harness.
+- A Content-Security-Policy with the script in its own file, as a second defence for the XSS rule. It needs the script out of `index.html`.
+- Return the current task in the 409 (ADR-014), so the page can skip the reload.
+
+**Known limits**
+- The status and priority lists in the page are copies of the enums. A new enum value needs a page change.
+- "Today" for the seed is the server's date, like the AI prompt (ADR-013).
+- After a create, a filter may hide the new task. The banner says so when a filter is active.
+- A status change always reloads the list, one extra request, and the order cannot change because status is not a sort key.
+- The page was checked in one browser by hand, not across browsers.
+
+- **Tradeoff:** the page's JavaScript is verified by a harness and by hand and not by a repository test, and it duplicates a few constants from the API. In return there is no build, no dependency and nothing to explain beyond one file. The seed makes the first run useful, at the cost of startup behaviour that tests must switch off, and that costs one small config file and a guard test.
+
 ---
 
 ## Pending (settle in the milestone session, then move up)
 
-**M7**
-- Seed demo data on startup, while keeping tests isolated from it?
+None open. M8 may add some.

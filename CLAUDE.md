@@ -41,9 +41,10 @@ task/      Task entity, enums, TaskRepository, TaskService, TaskController, DTOs
 project/   Project entity, ProjectRepository, ProjectService, ProjectController, DTOs
 ai/        AiClient interface, AnthropicAiClient, AiConfig, TaskSuggestionService, TaskSuggestionController (POST /tasks/suggest), suggestion DTOs, AI exceptions
 common/    error handling (GlobalExceptionHandler, exception types), PageResponse, config
+demo/      DemoDataSeeder: demo data loaded at startup when app.seed-demo-data=true (ADR-015)
 ```
 
-Dependencies between feature packages go one way: `ai/` may use `task/` (for `Priority` and `Task`'s limits), and `task/` never imports `ai/`. A feature's controller lives in its own package even when its URL sits under another feature's path.
+Dependencies between feature packages go one way: `ai/` may use `task/` (for `Priority` and `Task`'s limits), and `task/` never imports `ai/`. `demo/` uses the `task/` and `project/` services, and nothing imports `demo/`. A feature's controller lives in its own package even when its URL sits under another feature's path.
 
 Layering:
 

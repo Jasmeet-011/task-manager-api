@@ -192,7 +192,77 @@ As built in M5 (ADR-013). Nothing is saved and nothing touches the database.
 
 **Logging:** each AI failure is logged once, by `GlobalExceptionHandler`, from the exception's message. The client only ever gets a fixed `detail`. Invalid output is logged with the raw output, cut to 1,000 characters and without thinking blocks. The key is removed from anything the client builds, and the user's text is never logged.
 
-**After the draft:** the user fills any null `dueDate` or `priority`, then sends it to `POST /tasks`, where the normal validation runs again and the task starts as TODO.
+**After the draft:** the user fills any null `dueDate` or `priority`, then sends it to `POST /tasks`, where the normal validation runs again and the task starts as TODO. In the UI (M7) the page fills the create form from the draft and the user clicks Create (see the UI flows below).
+
+## The UI: `GET /` (M7, ADR-015)
+
+`index.html` is a static file that Spring Boot serves at `/`. It calls the API above from the browser and has no endpoint of its own. Every API call goes through one `api()` function, and every failure becomes the same problem shape (below).
+
+```
+Startup, when app.seed-demo-data=true (main config; the test config sets false)
+→ DemoDataSeeder (an ApplicationRunner, only a bean when the property is true)
+  projects and tasks both empty, checked through ProjectService.list and TaskService.list
+    no  → log "not loaded", nothing changes
+    yes → ProjectService.create x2
+          per task: TaskService.create (TODO, version 0)
+                    → assignProject (version 1)            if it has a project
+                    → update with the response's version   if its status is not TODO (version 2)
+          due dates = today (Clock) + an offset
+  an exception here stops the startup on purpose
+
+Page load
+→ GET /projects                    fills the project filter
+→ GET /tasks?page=0&size=5         renders the rows
+```
+
+**One result at a time.** Every action below starts with `clearResults()`: it hides the success banners, the suggest, create, status and list errors and the create field errors. A result stays until the next action. There is no timer.
+
+```
+List, filter, page   (a filter change goes back to page 0, Previous and Next change the page)
+→ clearResults
+→ GET /tasks?status=&priority=&projectId=&page=&size=5     only non-empty filters are sent
+  a request counter drops the answer to an older request
+  200 → rows (title, description, due, priority, status dropdown, project, version), "Page 1 of 2 · 8 tasks"
+  error → rows cleared, the error shown above the table
+
+Create
+→ clearResults, create button disabled
+→ POST /tasks { title, description|null, dueDate|null, priority|null }     no client-side validation
+  201 → form cleared, "Created task #N: title" (plus a note if a filter is active), page 0, list reloaded
+  400 → each fieldErrors entry under the input it names; title and detail in the box
+        entries with no input are listed in the box
+  other error → the box
+
+Suggest
+→ clearResults, suggest button disabled, "Suggesting..."
+→ POST /tasks/suggest { text }
+  200 → the four form fields are replaced by the draft (null becomes empty)
+        null dueDate or priority → highlighted yellow, plus a note saying what the note did not say
+        editing a highlighted field removes its highlight
+        nothing is saved; the user clicks Create (above)
+  400 (text), 502, 503, 504 → title, code and the server's detail in the box next to the note; the form is untouched
+
+Change a status (the dropdown in a row)
+→ clearResults, this dropdown disabled
+→ PUT /tasks/{id} { title, description, dueDate, priority, status: new, version: from the last load }
+  200 → "Task #N is now X.", list reloaded (the row shows the new status and version + 1)
+  409 VERSION_CONFLICT → "This task was changed elsewhere" in the status error box,
+                         dropdown set back, list reloaded (current data and version), so a retry works
+  404 → the API error, dropdown set back, list reloaded (the task is gone)
+  other error, or no answer → the error, dropdown set back
+```
+
+**The problem shape.** `api()` throws an `ApiError` with `{ status, title, detail, code, fieldErrors }` for every failure:
+
+```
+response not ok, Content-Type JSON  → the ADR-005 body, field by field
+response not ok, anything else      → "HTTP 400 Bad Request" (Tomcat's HTML page for a malformed URL)
+fetch itself fails                  → "Cannot reach the server"
+2xx whose body is not JSON          → "Unreadable response"
+not an ApiError (a bug in the page) → "Unexpected error in the page", also console.error
+```
+
+Every piece of API or AI text is set with `textContent`, `.value` or an attribute. `IndexPageTest` fails if the file contains an HTML-building call.
 
 ## Unexpected failure
 
