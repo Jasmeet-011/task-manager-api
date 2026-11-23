@@ -12,7 +12,7 @@
 | M5: AI suggest endpoint | Done | transcripts/05-ai-suggest.md |
 | M6: Optimistic locking | Done | transcripts/06-optimistic-locking.md |
 | M7: UI | Done | transcripts/07-ui.md |
-| M8: Hardening and submission prep | Not started | |
+| M8: Hardening and submission prep | Done (transcript export, `transcript.md` and the zip are yours) | transcripts/08-hardening.md |
 
 ## Session log
 
@@ -28,6 +28,46 @@ Newest first. One entry per Claude Code session.
 - Manually verified:
 - Left for next session:
 ```
+
+### Session 08: M8 Hardening and submission prep (2026-11-22)
+- Built: no code changes, by your rule.
+  - **README rewritten for submission** (`a34dfe9`), in the approved order:
+    - quick start (Java 17 check, clone or unzip, `mvnw.cmd`, the `chmod +x mvnw` / `sh mvnw` fallback, first run needs internet, another port)
+    - enabling the AI endpoint
+    - the API reference (every endpoint with its status codes, request and response bodies, `GET /tasks` in detail)
+    - the error format with the code table
+    - the AI endpoint (schema, your 2026-11-21 example, why `dueDate` and `priority` can be null, failure table)
+    - three design decisions with tradeoffs
+    - UI, seed data (plus the persistent-database line), the stretch feature, testing, how this was built (including your sounding-board sentence), known limits and next steps, and the project structure
+  - **Every example is real.** They were captured from `./mvnw spring-boot:run` on `ebf582a` with `ANTHROPIC_API_KEY` unset, one curl per request, and pretty-printed with the server's key order. The only AI success example is your real call. The stretch section's 409 example was replaced with a captured one (task 9).
+  - **PLAN.md:** the requirements traceability checklist is ticked, with a pointer per item. Only "Zip sent" stays open (below).
+- Decisions settled:
+  - **ADR-009 note:** start.spring.io now lists 4.2.0 as default (and 4.1.3 exists). You chose to keep 4.1.2 for submission.
+  - **ADR-005 known limit (found this session):** a body with a bad enum or date reports only that field. You agreed it's a documented limit, not a bug.
+  - The optional Tomcat `ErrorController` stays undone and is listed as a next step.
+  - No pending items were opened.
+- Tests:
+  - Fresh local clone of `a34dfe9` into `target/fresh-clone`: `env -u ANTHROPIC_API_KEY ./mvnw test` passed, 352 tests, 0 failures, 0 errors, exit 0. The count is unchanged from M7.
+  - The only "Unhandled exception" in the test log is the M2 test that throws on purpose.
+- Manually verified:
+  - **Fresh clone, no key:**
+    - `mvnw` is executable in the clone.
+    - `spring-boot:run` started in 1.1s and loaded the demo data (2 projects, 8 tasks).
+    - `/` returned 200 `text/html`, `GET /tasks` returned the 8 seeded tasks, and `POST /tasks/suggest` returned 503 `AI_NOT_CONFIGURED`.
+    - No `ERROR` or "Unhandled exception" in the run log.
+  - **Main working copy, while capturing the examples** (one request each):
+    - all 11 endpoints, `/` and `/h2-console`
+    - 400 variants: missing fields, bad enum, impossible date, malformed JSON, non-numeric id, unknown sort field, `size=101`, lowercase enum, backwards date range, missing `version`
+    - 404 for task, project and route
+    - 405 with `Allow`, 415, 406
+    - 409 `VERSION_CONFLICT` and 409 `DUPLICATE_PROJECT_NAME`
+    - suggest: 503 with no key, and 400 for blank text
+    - All matched the ADRs. No `ERROR` in that log either.
+- Not verified:
+  - A clone on a machine without the Maven and dependency cache. Maven 3.10.0 and the dependencies were already cached, so the "first run needs internet" line in the README is from the wrapper's design (`distributionType=only-script`), not from a test.
+  - A run on Windows.
+- Open items (yours): export `transcripts/08-hardening.md`, build the root `transcript.md` from all eight, commit both, then zip and send. "Transcript(s) included in order" is ticked ahead of the export, at your request. "Zip sent" stays unticked.
+- Left for next session: none. After submission: PREP.md and rehearsing the live extensions (PLAN.md).
 
 ### Session 07: M7 UI (2026-11-21)
 - Built (four code commits, plus the docs commit: `071862f` seed, `0599824` list page, `62e2b5b` create and suggest, `e92ba5e` status change):
@@ -267,3 +307,4 @@ Every time the model produced something wrong or poorly structured and I caught 
 | 07 | Ran `./mvnw clean` while my log and the harness lived in `target/`. | `clean` deleted the log being written (so the result line was missing) and, later, the whole harness. I had said I would keep throwaway files in `target/`, but did not think about `clean`. | The missing log file, and "No such file" when I went to re-run the harness. | Rebuilt the harness, copied it to the scratchpad before the final `clean`, and avoided `clean` during the milestone. |
 | 07 | My first harness had loose assertions and shared state across runs. | Two mutations survived because earlier runs had left a "Pay the invoice" task at the top of the list, and no check created from page 2. One check searched for the word "filter" in a task titled "No filter", one expected title had a typo, and a date trick (years near 1775) made the database shift a date by a day. All were my bugs, not the page's, and a survivor like that would have looked like a gap in the page. | Each survivor and each failing check on the committed page. I looked at why instead of accepting the numbers. | The harness now deletes non-seed tasks at the start of each run, creates from page 2, and uses fixed dates. One survivor remained, an equivalent mutant I confirmed with curl. |
 | 07 | Designed the success banners without a rule for how long a result stays on screen. | A green "Created task" stayed after the user started another action, so a later Suggest error looked as if both had just happened. My harness checked each message in isolation and never checked two actions in a row. | You found it clicking through the page in the browser. | `clearResults()` runs first in every action, with no timer. The harness now has an "only the latest result is shown" section, and a mutation for each action that skips it. |
+| 02 (found in 08) | Built and tested body validation field by field (missing title, bad enum, bad date, each on its own) and never checked a body with two kinds of error at once. | A bad enum or date fails JSON binding, so Bean Validation never runs, and only that one field is reported. ADR-012 documented the same thing for query params in M4, but the body case went undocumented for six milestones. | Capturing real examples for the README in M8, a request with a bad priority and a missing title came back naming only `priority`. I found it, not you. | Documented as a known limit in ADR-005 and the README, with your agreement. No code change. |

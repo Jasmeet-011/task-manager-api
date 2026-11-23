@@ -198,61 +198,73 @@ Decisions are in ADR-015. *(Changed from the first plan: no project dropdown on 
 
 ## Requirements traceability
 
-Every item from the assignment spec, mapped to where it's built. Tick each one off in M8.
+Every item from the assignment spec, mapped to where it's built. Ticked in M8 (2026-11-22), each with a pointer to where it's met. Test pointers are `Class.method` under `src/test/java/dev/jasmeet/taskmanager/`. Items still open are unticked and say why.
 
 **Stack**
-- [ ] Java 17 (M1)
-- [ ] Spring Boot latest stable (M1)
-- [ ] Maven (M1)
-- [ ] H2 in-memory (M1)
+- [x] Java 17 (M1): `pom.xml` `<java.version>17</java.version>`. Built, tested and run on JDK 17.0.21.
+- [x] Spring Boot latest stable (M1): 4.1.2, the latest stable when scaffolded on 2026-11-15 (ADR-009). 4.2.0 and 4.1.3 have shipped since. Kept 4.1.2 on purpose: see the 2026-11-22 note in ADR-009.
+- [x] Maven (M1): `pom.xml`, `mvnw`, `mvnw.cmd`, `.mvn/wrapper/` (ADR-001).
+- [x] H2 in-memory (M1): `application.properties` (`jdbc:h2:mem:taskmanager`).
 
 **1. Task CRUD with a relational element**
-- [ ] Task fields: id, title (required), description (optional), dueDate, priority, status (M2)
-- [ ] POST, GET list, GET by id, PUT, DELETE on `/tasks` (M2)
-- [ ] One relational entity, modeled properly (M3)
-- [ ] Create, list, associate and disassociate for that entity (M3)
+- [x] Task fields: id, title (required), description (optional), dueDate, priority, status (M2): `task/Task.java`, `CreateTaskRequest`, `UpdateTaskRequest` (ADR-010).
+- [x] POST, GET list, GET by id, PUT, DELETE on `/tasks` (M2): `task/TaskController.java`. README "API reference".
+- [x] One relational entity, modeled properly (M3): `project/Project.java`, with a unidirectional lazy `@ManyToOne` from `Task` and no cascade (ADR-002, ADR-011).
+- [x] Create, list, associate and disassociate for that entity (M3): `POST /projects`, `GET /projects`, `PUT /tasks/{id}/project/{projectId}`, `DELETE /tasks/{id}/project`. Tests in `ProjectApiIntegrationTest` and `TaskProjectIntegrationTest`.
 
 **2. Querying**
-- [ ] Filter by status, priority, dueBefore and dueAfter (M4)
-- [ ] Filter by project (M4)
-- [ ] Sort by dueDate and priority (M4)
-- [ ] Pagination, documented (M4, M8)
-- [ ] Filters combinable in one request (M4)
+- [x] Filter by status, priority, dueBefore and dueAfter (M4): `task/TaskSpecifications.java`, `TaskFilterIntegrationTest` (ADR-012).
+- [x] Filter by project (M4): `TaskFilterIntegrationTest.projectId_returnsOnlyThatProjectsTasks`.
+- [x] Sort by dueDate and priority (M4): `task/TaskSort.java`. `TaskSortIntegrationTest.priorityAscending_isLowMediumHigh_notAlphabetical` and `priorityDescending_isHighMediumLow`.
+- [x] Pagination, documented (M4, M8): `common/PageResponse.java`. README "`GET /tasks` in detail" (ADR-006, ADR-012).
+- [x] Filters combinable in one request (M4): `TaskFilterIntegrationTest.combinedFilters_withPagination_returnsTheRightRowsAndTotals`.
 
 **3. Validation and errors**
-- [ ] 400 with a structured body naming the failed fields: missing required fields, malformed dates, unknown enums (M2, M4)
-- [ ] 404 with the same body shape (M2)
-- [ ] Format chosen deliberately and explainable (ADR-005)
+- [x] 400 with a structured body naming the failed fields: missing required fields, malformed dates, unknown enums (M2, M4). Tests: `ErrorHandlingIntegrationTest.missingTitle_namesTheField`, `malformedDate_namesTheField` and `unknownPriority_namesTheFieldAndListsTheAllowedValues`, plus the query-param versions in the same class. Known limit: a body with a bad enum or date reports only that field (ADR-005).
+- [x] 404 with the same body shape (M2): `ErrorHandlingIntegrationTest.missingTask_returns404WithTheSameShape` and `unknownRoute_returns404WithTheSameShape`.
+- [x] Format chosen deliberately and explainable (ADR-005): `common/GlobalExceptionHandler.java`. README "Error format" and Design decision 1.
 
 **4. AI endpoint**
-- [ ] Calls a real model (M5)
-- [ ] Validates model output server-side, with a clean error on malformed output (M5)
-- [ ] Degrades cleanly on timeout and upstream errors (M5)
-- [ ] Stable JSON schema documented in the README (M5, M8)
+- [x] Calls a real model (M5): `ai/AnthropicAiClient.java` (Messages API over `RestClient`). Verified only by your four real calls on 2026-11-21 (PROGRESS session 05). Tests never call the model, by design.
+- [x] Validates model output server-side, with a clean error on malformed output (M5): `ai/TaskSuggestionService.java`, `TaskSuggestionServiceTest`, and `SuggestEndToEndTest.toolCallWithInvalidContent_is502OutputInvalid` (ADR-013).
+- [x] Degrades cleanly on timeout and upstream errors (M5): `SuggestEndToEndTest.slowAnswer_is504Timeout_afterTheConfiguredReadTimeout` and `rejectedKey_is502_andTheKeyAppearsNeitherInTheResponseNorInTheLog`, `AnthropicAiClientTest`, `TaskSuggestionApiIntegrationTest.aiFailure_mapsToItsStatusAndCode_withAFixedDetail`, and `SuggestWithoutKeyTest.noKey_is503NotConfigured_andTellsTheOperatorWhatToSet`.
+- [x] Stable JSON schema documented in the README (M5, M8): README "AI endpoint", with the request and response tables, a real example and the failure table.
 
 **5. Stretch feature**
-- [ ] Optimistic locking with 409 on concurrent update (M6)
-- [ ] README: built, left out, next (M6, M8)
+- [x] Optimistic locking with 409 on concurrent update (M6): `TaskService.update` and `flushOrConflict`. `TaskVersioningIntegrationTest.put_withTheRightVersion_succeeds_thenTheSameVersionAgainIsA409` and `put_twoConcurrentRequestsWithTheSameVersion_oneWinsOneConflicts` (ADR-007, ADR-014).
+- [x] README: built, left out, next (M6, M8): README "Stretch feature: optimistic locking", plus "Known limits and next steps".
 
 **6. UI**
-- [ ] View the task list with at least one filter (M7)
-- [ ] Create a task (M7)
-- [ ] Trigger the AI endpoint and display the result (M7)
+- [x] View the task list with at least one filter (M7): `static/index.html` (status, priority and project filters, ADR-015).
+- [x] Create a task (M7): `static/index.html` create form.
+- [x] Trigger the AI endpoint and display the result (M7): `static/index.html` suggest box, which fills the create form. Checked by hand with a real key in M7. Repository test: only `IndexPageTest` (the page is served, no HTML-building calls).
 
 **7. Tests (pass with `./mvnw test`)**
-- [ ] At least one unit test per service-layer method, happy path (M2 to M6)
-- [ ] Integration test exercising each CRUD endpoint end to end with the Spring context (M2)
-- [ ] Combined filters plus pagination test (M4)
-- [ ] Validation failure test asserting the error body (M2)
-- [ ] AI endpoint test with the model mocked (M5)
-- [ ] Malformed model output test (M5)
+- [x] At least one unit test per service-layer method, happy path (M2 to M6):
+  - `TaskServiceTest` covers all 7 methods (create, get, list, update, delete, assignProject, unassignProject).
+  - `ProjectServiceTest` covers all 3 (create, get, list).
+  - `TaskSuggestionServiceTest` covers `suggest`.
+- [x] Integration test exercising each CRUD endpoint end to end with the Spring context (M2): `TaskApiIntegrationTest`:
+  - `post_createsTaskWithStatusTodo_andLocationPointsAtTheCreatedTask`
+  - `getList_returnsPageResponseShapeWithDefaults`
+  - `getById_returnsTask`
+  - `put_replacesAllFields_andTheChangePersists`
+  - `delete_removesTask_thenGetAndSecondDeleteReturn404`
+- [x] Combined filters plus pagination test (M4): `TaskFilterIntegrationTest.combinedFilters_withPagination_returnsTheRightRowsAndTotals`.
+- [x] Validation failure test asserting the error body (M2): `ErrorHandlingIntegrationTest.missingTitle_namesTheField` (and the rest of that class).
+- [x] AI endpoint test with the model mocked (M5): `TaskSuggestionApiIntegrationTest` (`AiClient` as a `@MockitoBean`), e.g. `returnsTheDraft_withExactlyTheFourFields_andSavesNothing`.
+- [x] Malformed model output test (M5): `SuggestEndToEndTest.malformedModelOutput_is502OutputInvalid_andTheRawOutputIsLogged`.
 
 **8. README**
-- [ ] Clone, one command, running (M8)
-- [ ] AI endpoint description, schema, example (M8)
-- [ ] Design Decisions section with 2 or 3 tradeoffs (M8)
+- [x] Clone, one command, running (M8): README "Quick start". Checked on a fresh clone in M8.
+- [x] AI endpoint description, schema, example (M8): README "AI endpoint".
+- [x] Design Decisions section with 2 or 3 tradeoffs (M8): README "Design decisions" (error format, AI output as untrusted, optimistic locking scope).
 
 **Build and submission**
-- [ ] `./mvnw spring-boot:run` works cold on JDK 17 (M8)
-- [ ] Transcript(s) included in order (M8)
-- [ ] Zip sent to everyone CC'd with subject `Backend Engineer Pre-Onsite — Jasmeet Singh Wadhwa` (M8)
+- [x] `./mvnw spring-boot:run` works cold on JDK 17 (M8). Fresh local clone of `a34dfe9` into `target/fresh-clone`, `ANTHROPIC_API_KEY` unset:
+  - `./mvnw test` passed: 352 tests, 0 failures, exit 0.
+  - `spring-boot:run` started in 1.1s with the demo data.
+  - `/` returned 200 HTML, `GET /tasks` showed 8 tasks, and `POST /tasks/suggest` returned 503 `AI_NOT_CONFIGURED`.
+  - Caveat: Maven 3.10.0 and the dependencies were already in the local cache. On a machine without them, the first run needs internet (the README says so).
+- [x] Transcript(s) included in order (M8): `transcripts/01-scaffold.md` to `transcripts/08-hardening.md`, one per session, plus the root `transcript.md` with all eight in order. `08` and `transcript.md` are added by you right after the M8 export.
+- [ ] Zip sent to everyone CC'd with subject `Backend Engineer Pre-Onsite — Jasmeet Singh Wadhwa` (M8). **Open:** your step, after the transcripts are in.

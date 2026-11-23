@@ -74,7 +74,8 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 - **Amended in M3:** `DUPLICATE_PROJECT_NAME` was added (ADR-011). It is specific, like `VERSION_CONFLICT`, so a client can switch on it. The 409 lists `name` in `fieldErrors` because a specific field failed.
 - **Amended in M5:** no new codes (ADR-013). `AI_NOT_CONFIGURED` means only "no key set". A key that is set but rejected (401 or 403) is `AI_UPSTREAM_ERROR`, logged at ERROR so the operator knows to fix it. A connect timeout is `AI_TIMEOUT`, like a read timeout.
 - **Amended in M6:** no new codes (ADR-014). `VERSION_CONFLICT` has `fieldErrors: []` and does not carry the current version. It is also returned by assign and unassign when they lose a race.
-- **Known limit:** errors Tomcat rejects before Spring MVC runs (malformed URLs such as `/tasks/%`) return Tomcat's HTML 400 page, not this body. It leaks no stack trace or message. Optional M8 item.
+- **Known limit:** errors Tomcat rejects before Spring MVC runs (malformed URLs such as `/tasks/%`) return Tomcat's HTML 400 page, not this body. It leaks no stack trace or message. Optional M8 item, not done (M8 was docs and verification only), listed as a next step in the README.
+- **Known limit (found in M8):** a request body with an invalid enum or date reports only that field. The JSON cannot be bound, so Bean Validation never runs, and other failing fields (a missing `title`, say) appear only after the client fixes the first one. Example: `{"dueDate":"2026-12-01","priority":"URGENT"}` returns only `priority`. It is always a correct 400, never a 500. This is the body-side counterpart of ADR-012's "one param at a time".
 
 - **Why:** A real standard that's built into Spring, with one shape for every error and field-level detail where it matters.
 - **Tradeoff:** Slightly verbose, and `code` and `fieldErrors` are our own extensions.
@@ -106,6 +107,7 @@ RFC 9457 replaced RFC 7807. Spring's `ProblemDetail` implements it. Content type
 - **Consequences:** Jackson 3 (`tools.jackson` packages) and `@MockitoBean` in tests. The H2 console is its own module (`spring-boot-h2console`), which Initializr adds to the pom automatically.
 - **Note:** Initializr reports the version as `4.1.2.RELEASE`, but Maven Central publishes `4.1.2`. The generated pom had to be corrected to `4.1.2`.
 - **Tradeoff:** A newer major line has less community material than Boot 3.x.
+- **Note (2026-11-22, M8):** start.spring.io now lists 4.2.0 as the default stable release, and a 4.1.3 patch exists. 4.1.2 was the latest stable when the project was scaffolded on 2026-11-15. We keep it: upgrading two days before submission would put a fully tested build (352 tests) at risk for no feature or fix the project needs. Moving to 4.2.x is a next step, with a full test run and a check of the 4.2 release notes.
 
 ### ADR-010: Task field rules and PUT semantics (M2)
 
@@ -413,4 +415,4 @@ Builds on ADR-003 and ADR-013 (the AI suggests, the human confirms), ADR-005 (th
 
 ## Pending (settle in the milestone session, then move up)
 
-None open. M8 may add some.
+None open. M8 added none.
